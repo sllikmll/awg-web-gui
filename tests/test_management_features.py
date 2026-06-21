@@ -31,10 +31,12 @@ def test_public_server_masks_ssh_password(tmp_path, monkeypatch):
 
 def test_public_client_hides_private_key_but_keeps_status(tmp_path, monkeypatch):
     app = load_app(tmp_path, monkeypatch)
-    client = {"id": "c", "name": "phone", "privkey": "PRIVATE", "pubkey": "PUBLIC"}
+    client = {"id": "c", "name": "phone", "privkey": "PRIVATE", "pubkey": "PUBLIC", "preshared_key": "PSK"}
     public = app.public_client(client)
     assert public["has_privkey"] is True
+    assert public["has_preshared_key"] is True
     assert "privkey" not in public
+    assert "preshared_key" not in public
     assert public["pubkey"] == "PUBLIC"
 
 

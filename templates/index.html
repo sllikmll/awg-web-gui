@@ -306,7 +306,7 @@ function editServer(id) {
 }
 function editClient(id) {
   const c = currentClients.find(x => x.id === id); if (!c) return; editingId = id; const f = document.getElementById('editClientForm'); f.elements['id'].value = c.id;
-  ['name','address','allowed_ips','preshared_key'].forEach(k => f.elements[k].value = c[k] || ''); f.elements['privkey'].value=''; openModal('editClientModal');
+  ['name','address','allowed_ips'].forEach(k => f.elements[k].value = c[k] || ''); f.elements['preshared_key'].value=''; f.elements['privkey'].value=''; openModal('editClientModal');
 }
 
 document.getElementById('serverForm').addEventListener('submit', async e=>{
@@ -327,7 +327,7 @@ document.getElementById('editServerForm').addEventListener('submit', async e => 
 });
 document.getElementById('editClientForm').addEventListener('submit', async e => {
   e.preventDefault(); const fd = new FormData(e.target); const body = {};
-  ['name','address','allowed_ips','preshared_key','privkey'].forEach(k => { if(k !== 'privkey' || fd.get(k)) body[k] = fd.get(k); });
+  ['name','address','allowed_ips'].forEach(k => body[k] = fd.get(k)); ['preshared_key','privkey'].forEach(k => { if(fd.get(k)) body[k] = fd.get(k); });
   try { const j = await api('PUT','/clients/'+editingId, body); toast('Клиент обновлён: '+j.client.name); closeModal('editClientModal'); await loadAll(); }
   catch(err){ toast('Не обновил клиента: '+err.message+'\n'+JSON.stringify(err.data||{},null,2), true); }
 });

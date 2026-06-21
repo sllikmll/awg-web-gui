@@ -271,7 +271,7 @@ docker exec amnezia-awg2 awg show awg0 dump
 
 - Пароли пользователей хэшируются через Werkzeug; старый SHA256 admin hash поддерживается для backward compatibility.
 - `ssh_password` не отдаётся обратно через `/api/servers`, только флаг `has_ssh_password`.
-- `privkey` клиента не отдаётся через `/api/clients`, только флаг `has_privkey`.
+- `privkey` и `preshared_key` клиента не отдаются через `/api/clients`, только флаги `has_privkey` / `has_preshared_key`.
 - Для production используйте HTTPS reverse proxy и смените `admin/admin`.
 - SSH password хранится в SQLite, если вы его используете. Для production лучше SSH key.
 - Private client keys хранятся в SQLite plain text, чтобы можно было генерировать config/QR. Ограничьте доступ к `/data` и делайте backup аккуратно.

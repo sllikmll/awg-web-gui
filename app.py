@@ -68,7 +68,9 @@ def public_server(server: dict[str, Any]) -> dict[str, Any]:
 def public_client(client: dict[str, Any]) -> dict[str, Any]:
     item = dict(client)
     item["has_privkey"] = bool(item.get("privkey"))
+    item["has_preshared_key"] = bool(item.get("preshared_key"))
     item.pop("privkey", None)
+    item.pop("preshared_key", None)
     return item
 
 

@@ -64,22 +64,15 @@
       <form id="serverForm" class="grid">
         <input name="name" placeholder="Название, например admrus-legacy" required>
         <input name="host" placeholder="IP / hostname" required>
-        <select name="version" id="serverVersion">
-          <option value="1.5">AWG 1.5 — amnezia-awg / wg0</option>
-          <option value="2.0">AWG 2.0 — amnezia-awg2 / awg0</option>
-        </select>
         <input name="ssh_user" placeholder="SSH user" value="root">
         <input name="ssh_port" type="number" placeholder="SSH port" value="22">
         <input name="ssh_key" placeholder="Путь к SSH ключу">
         <input name="ssh_password" type="password" placeholder="SSH пароль вместо ключа">
-        <input name="wg_port" type="number" placeholder="UDP порт (872x / 972x)">
         <input name="endpoint" placeholder="Endpoint для клиента, если отличается от host">
-        <input name="subnet" placeholder="VPN subnet" value="10.8.0.0/24">
-        <input name="dns" placeholder="DNS" value="1.1.1.1,8.8.8.8">
         <label style="display:flex;align-items:center;gap:8px"><input name="validate" type="checkbox" checked> Проверить SSH/контейнер при добавлении</label>
         <button type="submit">Добавить сервер</button>
       </form>
-      <div class="hint">Удаление сервера удаляет его только из базы панели, реальные контейнеры не трогает.</div>
+      <div class="hint">Версия AWG, контейнер, interface, config path, UDP port, subnet и DNS определяются автоматически из remote config. Удаление сервера удаляет его только из базы панели, реальные контейнеры не трогает.</div>
       <div id="serversList"></div>
     </section>
 
@@ -221,10 +214,9 @@ async function pollNow(){ try { const j=await api('POST','/poll'); toast('Poll O
 async function pollServer(id){ try { const j=await api('POST','/servers/'+id+'/poll'); toast('Poll server: '+JSON.stringify(j)); await loadClients(); } catch(e){ toast('Poll failed: '+e.message,true); } }
 
 
-document.getElementById('serverVersion').addEventListener('change', e => { const p = document.querySelector('[name="wg_port"]'); if(!p.value) p.placeholder = e.target.value==='1.5'?'UDP порт (обычно 872x)':'UDP порт (обычно 972x)'; });
 document.getElementById('serverForm').addEventListener('submit', async e=>{
   e.preventDefault(); const fd=new FormData(e.target); const body={}; for(const [k,v] of fd.entries()) body[k]=v; body.validate = fd.get('validate') === 'on';
-  try { const j=await api('POST','/servers',body); toast('Сервер добавлен: '+j.server.name); e.target.reset(); await loadAll(); }
+  try { const j=await api('POST','/servers',body); toast(j.servers && j.servers.length > 1 ? `Добавлено серверов: ${j.servers.map(s=>s.name).join(', ')}` : 'Сервер добавлен: '+j.server.name); e.target.reset(); await loadAll(); }
   catch(err){ toast('Не добавил сервер: '+err.message+'\n'+JSON.stringify(err.data||{},null,2), true); }
 });
 document.getElementById('clientForm').addEventListener('submit', async e=>{

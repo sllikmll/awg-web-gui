@@ -82,3 +82,44 @@ def test_public_from_private_matches_generated_keypair(tmp_path, monkeypatch):
     app = load_app(tmp_path, monkeypatch)
     priv, pub = app.generate_keypair()
     assert app.public_from_private(priv) == pub
+
+
+
+def test_detected_server_from_conf_uses_address_and_listen_port(tmp_path, monkeypatch):
+    app = load_app(tmp_path, monkeypatch)
+    base = {
+        "name": "admrus",
+        "host": "138.16.227.27",
+        "ssh_user": "root",
+        "ssh_port": 22,
+        "ssh_key": "/ssh/id_ed25519",
+        "endpoint": "",
+    }
+    conf = """[Interface]
+PrivateKey = x
+Address = 10.9.5.0/24
+ListenPort = 9727
+DNS = 9.9.9.9
+"""
+
+    detected = app.build_detected_server(base, "2.0", conf)
+
+    assert detected["version"] == "2.0"
+    assert detected["container"] == "amnezia-awg2"
+    assert detected["interface"] == "awg0"
+    assert detected["wg_port"] == 9727
+    assert detected["subnet"] == "10.9.5.0/24"
+    assert detected["dns"] == "9.9.9.9"
+    assert detected["endpoint"] == "138.16.227.27"
+
+
+def test_detected_server_without_dns_keeps_safe_default(tmp_path, monkeypatch):
+    app = load_app(tmp_path, monkeypatch)
+    base = {"name": "admrus", "host": "1.2.3.4"}
+    conf = "[Interface]\nAddress = 10.8.7.1/24\nListenPort = 8727\n"
+
+    detected = app.build_detected_server(base, "1.5", conf)
+
+    assert detected["subnet"] == "10.8.7.0/24"
+    assert detected["wg_port"] == 8727
+    assert detected["dns"] == "1.1.1.1,8.8.8.8"

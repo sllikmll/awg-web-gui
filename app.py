@@ -408,6 +408,88 @@ def parse_interface_value(conf: str, key: str) -> str:
     return ""
 
 
+def server_access_base(data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(data.get("id") or "").strip(),
+        "name": str(data.get("name", "")).strip(),
+        "host": str(data.get("host", "")).strip(),
+        "ssh_user": str(data.get("ssh_user", "root")).strip() or "root",
+        "ssh_port": int(data.get("ssh_port", 22) or 22),
+        "ssh_key": str(data.get("ssh_key", "")).strip(),
+        "ssh_password": str(data.get("ssh_password", "")).strip(),
+        "endpoint": str(data.get("endpoint", "")).strip(),
+        "dns": str(data.get("dns", "")).strip(),
+    }
+
+
+def build_detected_server(base: dict[str, Any], version: str, conf: str) -> dict[str, Any]:
+    d = version_defaults(version)
+    data = dict(base)
+    data["version"] = version
+    data["container"] = d["container"]
+    data["interface"] = d["interface"]
+    data["config_path"] = d["config_path"]
+
+    listen_port = parse_interface_value(conf, "ListenPort")
+    if listen_port:
+        data["wg_port"] = int(listen_port)
+
+    address = parse_interface_value(conf, "Address")
+    if address:
+        data["subnet"] = str(ipaddress.ip_network(address.split(",", 1)[0].strip(), strict=False))
+
+    dns = parse_interface_value(conf, "DNS") or data.get("dns") or "1.1.1.1,8.8.8.8"
+    data["dns"] = dns
+    if not data.get("endpoint"):
+        data["endpoint"] = data.get("host", "")
+    return normalize_server(data, server_conf=conf)
+
+
+def refresh_server_metadata_from_remote(server: dict[str, Any]) -> dict[str, Any]:
+    """Refresh subnet/listen port/DNS from the live AWG config without mutating remote."""
+    conf = read_server_conf(server)
+    if not conf:
+        return server
+    refreshed = build_detected_server(server, server["version"], conf)
+    # Preserve stable identity and friendly name.
+    refreshed["id"] = server["id"]
+    refreshed["name"] = server.get("name") or refreshed["name"]
+    server.update(refreshed)
+    return server
+
+
+def detect_awg_servers(data: dict[str, Any]) -> list[dict[str, Any]]:
+    base = server_access_base(data)
+    if not base.get("name") or not base.get("host"):
+        raise ValueError("name and host are required")
+
+    detected: list[dict[str, Any]] = []
+    errors: dict[str, Any] = {}
+    # Prefer 2.0 first in the UI because that is the current target stack.
+    for version in ["2.0", "1.5"]:
+        d = version_defaults(version)
+        probe = normalize_server({**base, "version": version, "container": d["container"], "interface": d["interface"], "config_path": d["config_path"]})
+        r = cexec(probe, f"test -f {q(d['config_path'])} && cat {q(d['config_path'])}", timeout=25)
+        if not r["ok"] or not r["out"].strip():
+            errors[version] = r
+            continue
+        srv = build_detected_server(base, version, r["out"])
+        detected.append(srv)
+
+    if not detected:
+        raise RuntimeError("No supported AWG containers/configs detected", errors)
+
+    if len(detected) > 1:
+        for srv in detected:
+            suffix = "awg 2.0" if srv["version"] == "2.0" else "legacy 1.5"
+            if suffix not in srv["name"].lower():
+                srv["name"] = f"{srv['name']} {suffix}"
+            # Make IDs unique when a single host expands to both variants.
+            if not data.get("id"):
+                srv["id"] = str(uuid.uuid4())[:8]
+    return detected
+
+
 def parse_peer_blocks(conf: str) -> list[dict[str, Any]]:
     peers: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
@@ -839,6 +921,17 @@ def list_servers():
 def add_server():
     data = request.json or {}
     try:
+        if not data.get("version"):
+            servers = detect_awg_servers(data)
+            created = []
+            for s in servers:
+                if s["id"] in SERVERS:
+                    continue
+                SERVERS[s["id"]] = s
+                created.append(s)
+            persist()
+            return jsonify({"ok": True, "server": created[0] if created else servers[0], "servers": created, "detected": servers})
+
         s = normalize_server(data)
         if not s["name"] or not s["host"]:
             return jsonify({"ok": False, "error": "name and host are required"}), 400
@@ -854,7 +947,7 @@ def add_server():
             s = normalize_server(data, server_conf=server_conf)
         SERVERS[s["id"]] = s
         persist()
-        return jsonify({"ok": True, "server": s})
+        return jsonify({"ok": True, "server": s, "servers": [s]})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
@@ -964,6 +1057,7 @@ def add_client():
     if not s:
         return jsonify({"ok": False, "error": "server not found"}), 404
     try:
+        refresh_server_metadata_from_remote(s)
         priv, pub = generate_keypair()
         address = data.get("address") or next_client_ip(s)
         # Validate early.

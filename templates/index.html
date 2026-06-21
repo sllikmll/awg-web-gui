@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AmneziaWG Web GUI</title>
+  <style>
+    :root { color-scheme: light; --bg:#f5f7fb; --card:#fff; --text:#172033; --muted:#64748b; --line:#e2e8f0; --blue:#2563eb; --red:#dc2626; --green:#16a34a; --amber:#d97706; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--text); }
+    .container { max-width: 1180px; margin: 0 auto; padding: 24px; }
+    .top { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:16px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin:14px 0; box-shadow:0 8px 24px rgba(15,23,42,.05); }
+    .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:10px; }
+    input, select, button { font:inherit; padding:9px 11px; border-radius:9px; border:1px solid #cbd5e1; }
+    button { border:0; background:var(--blue); color:white; cursor:pointer; font-weight:600; }
+    button:hover { filter:brightness(.95); }
+    button.secondary { background:#64748b; }
+    button.danger { background:var(--red); }
+    button.small { padding:6px 9px; font-size:13px; }
+    table { width:100%; border-collapse:collapse; margin-top:10px; }
+    th, td { padding:9px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-size:13px; }
+    code { background:#f1f5f9; padding:2px 5px; border-radius:5px; }
+    .badge { display:inline-block; background:#e0e7ff; color:#3730a3; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:700; }
+    .ok { color:var(--green); font-weight:700; }
+    .bad { color:var(--red); font-weight:700; }
+    .warn { color:var(--amber); font-weight:700; }
+    .muted { color:var(--muted); }
+    .hidden { display:none !important; }
+    #login { max-width: 390px; margin: 9vh auto; }
+    #toast { position:fixed; right:20px; bottom:20px; max-width:560px; white-space:pre-wrap; z-index:10; }
+    .modal { position:fixed; inset:0; background:rgba(15,23,42,.45); display:none; align-items:center; justify-content:center; padding:16px; z-index:20; }
+    .modal.active { display:flex; }
+    .modal .card { width:min(720px, 96vw); max-height:90vh; overflow:auto; }
+    .row-actions { display:flex; gap:6px; flex-wrap:wrap; }
+    .hint { font-size:13px; color:var(--muted); margin-top:6px; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <section id="login" class="card hidden">
+    <h1>AmneziaWG Web GUI</h1>
+    <p class="muted">Вход в локальную панель управления AWG-серверами.</p>
+    <form id="loginForm" class="grid" style="grid-template-columns:1fr">
+      <input name="username" placeholder="Логин" value="admin" autocomplete="username" required>
+      <input name="password" type="password" placeholder="Пароль" value="admin" autocomplete="current-password" required>
+      <button type="submit">Войти</button>
+    </form>
+    <div class="hint">Dev default: admin/admin. Для production поменять обязательно.</div>
+  </section>
+
+  <main id="app" class="hidden">
+    <div class="top">
+      <div>
+        <h1 style="margin:0">AmneziaWG Web GUI</h1>
+        <div class="muted">Минимальное управление серверами и клиентами AWG 1.5 / 2.0</div>
+      </div>
+      <button class="secondary" onclick="logout()">Выйти</button>
+    </div>
+
+    <section class="card">
+      <h2>Серверы</h2>
+      <form id="serverForm" class="grid">
+        <input name="name" placeholder="Название, например admrus-legacy" required>
+        <input name="host" placeholder="IP / hostname" required>
+        <select name="version" id="serverVersion">
+          <option value="1.5">AWG 1.5 — amnezia-awg / wg0</option>
+          <option value="2.0">AWG 2.0 — amnezia-awg2 / awg0</option>
+        </select>
+        <input name="ssh_user" placeholder="SSH user" value="root">
+        <input name="ssh_port" type="number" placeholder="SSH port" value="22">
+        <input name="ssh_key" placeholder="Путь к SSH ключу на Windows">
+        <input name="wg_port" type="number" placeholder="UDP порт (872x / 972x)">
+        <input name="endpoint" placeholder="Endpoint для клиента, если отличается от host">
+        <input name="subnet" placeholder="VPN subnet" value="10.8.0.0/24">
+        <input name="dns" placeholder="DNS" value="1.1.1.1,8.8.8.8">
+        <label style="display:flex;align-items:center;gap:8px"><input name="validate" type="checkbox" checked> Проверить SSH/контейнер при добавлении</label>
+        <button type="submit">Добавить сервер</button>
+      </form>
+      <div class="hint">Удаление сервера удаляет его только из базы панели, реальные контейнеры не трогает.</div>
+      <div id="serversList"></div>
+    </section>
+
+    <section class="card">
+      <h2>Клиенты</h2>
+      <form id="clientForm" class="grid">
+        <select id="clientServer" name="server_id" required></select>
+        <input name="name" placeholder="Имя клиента" required>
+        <input name="address" placeholder="IP клиента, пусто = авто">
+        <input name="allowed_ips" placeholder="AllowedIPs в клиентском конфиге" value="0.0.0.0/0, ::/0">
+        <input name="preshared_key" placeholder="PSK, пусто = авто">
+        <button type="submit">Добавить клиента на сервер</button>
+      </form>
+      <div class="hint">При добавлении делается backup remote config, запись peer в config и restart только AWG-контейнера.</div>
+      <div id="clientsList"></div>
+    </section>
+  </main>
+</div>
+
+<div id="toast" class="card hidden"></div>
+
+<div id="editServerModal" class="modal">
+  <div class="card">
+    <h3>Редактировать сервер</h3>
+    <form id="editServerForm" class="grid">
+      <input type="hidden" name="id">
+      <input name="name" placeholder="Название" required>
+      <input name="host" placeholder="IP / hostname" required>
+      <input name="ssh_user" placeholder="SSH user">
+      <input name="ssh_port" type="number" placeholder="SSH port">
+      <input name="ssh_key" placeholder="Путь к SSH ключу">
+      <input name="wg_port" type="number" placeholder="UDP порт">
+      <input name="endpoint" placeholder="Endpoint">
+      <input name="subnet" placeholder="VPN subnet">
+      <input name="dns" placeholder="DNS">
+      <input name="container" placeholder="Имя Docker-контейнера">
+      <input name="interface" placeholder="WireGuard interface">
+      <input name="config_path" placeholder="Путь к config внутри контейнера">
+      <button type="submit">Сохранить</button>
+      <button type="button" class="secondary" onclick="closeModal('editServerModal')">Отмена</button>
+    </form>
+  </div>
+</div>
+
+<div id="editClientModal" class="modal">
+  <div class="card">
+    <h3>Редактировать клиента</h3>
+    <form id="editClientForm" class="grid">
+      <input type="hidden" name="id">
+      <input name="name" placeholder="Имя" required>
+      <input name="address" placeholder="IP клиента">
+      <input name="allowed_ips" placeholder="AllowedIPs в клиентском конфиге">
+      <input name="preshared_key" placeholder="Preshared key">
+      <button type="submit">Сохранить</button>
+      <button type="button" class="secondary" onclick="closeModal('editClientModal')">Отмена</button>
+    </form>
+  </div>
+</div>
+
+<script>
+const API = '/api';
+let currentServers = {};
+let currentClients = [];
+
+function esc(s) { return String(s ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
+function toast(msg, isErr=false) { const t=document.getElementById('toast'); t.textContent=msg; t.classList.remove('hidden'); t.style.borderColor=isErr?'#fecaca':'#bbf7d0'; clearTimeout(window.__toast); window.__toast=setTimeout(()=>t.classList.add('hidden'), isErr?12000:5000); }
+async function api(method, path, body) {
+  const opts = {method, credentials:'same-origin', headers:{}};
+  if (body !== undefined) { opts.headers['Content-Type']='application/json'; opts.body=JSON.stringify(body); }
+  const r = await fetch(API + path, opts);
+  const ct = r.headers.get('content-type') || '';
+  const data = ct.includes('application/json') ? await r.json() : await r.text();
+  if (!r.ok) { const e = new Error(typeof data === 'string' ? data : (data.error || JSON.stringify(data))); e.data=data; e.status=r.status; throw e; }
+  return data;
+}
+
+async function refreshAuth() {
+  const me = await api('GET','/me');
+  document.getElementById('login').classList.toggle('hidden', me.logged_in);
+  document.getElementById('app').classList.toggle('hidden', !me.logged_in);
+  if (me.logged_in) await loadAll();
+}
+
+document.getElementById('loginForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  try { await api('POST','/login',{username:fd.get('username'), password:fd.get('password')}); toast('Вход выполнен'); await refreshAuth(); }
+  catch(err) { toast('Ошибка входа: ' + err.message, true); }
+});
+async function logout(){ await api('POST','/logout'); await refreshAuth(); }
+
+async function loadAll(){ await loadServers(); await loadClients(); }
+async function loadServers(){
+  currentServers = await api('GET','/servers');
+  const arr = Object.values(currentServers);
+  document.getElementById('clientServer').innerHTML = arr.length ? arr.map(s=>`<option value="${esc(s.id)}">${esc(s.name)} (${esc(s.version)})</option>`).join('') : '<option disabled>Нет серверов</option>';
+  document.getElementById('serversList').innerHTML = arr.length ? `<table><tr><th>Название</th><th>Host</th><th>Версия</th><th>Контейнер</th><th>Порт</th><th>Статус</th><th></th></tr>${arr.map(s=>`<tr>
+    <td>${esc(s.name)}</td><td>${esc(s.host)}</td><td><span class="badge">${esc(s.version)}</span></td><td><code>${esc(s.container)}/${esc(s.interface)}</code></td><td>${esc(s.wg_port)}</td><td id="status_${esc(s.id)}" class="muted">...</td>
+    <td class="row-actions"><button class="small" onclick="editServer('${esc(s.id)}')">Edit</button><button class="small" onclick="health('${esc(s.id)}')">Health</button><button class="small" onclick="syncServer('${esc(s.id)}')">Sync</button><button class="small danger" onclick="delServer('${esc(s.id)}')">Del</button></td></tr>`).join('')}</table>` : '<p class="muted">Серверов пока нет.</p>';
+  arr.forEach(s=>health(s.id, true));
+}
+async function health(id, silent=false){
+  const el=document.getElementById('status_'+id); if(el) el.textContent='checking...';
+  try { const j=await api('GET','/servers/'+id+'/health'); if(el){ el.textContent=j.ok?'online':'fail: '+j.stage; el.className=j.ok?'ok':'bad'; } if(!silent) toast(JSON.stringify(j,null,2), !j.ok); }
+  catch(e){ if(el){el.textContent='error'; el.className='bad';} if(!silent) toast(e.message,true); }
+}
+async function loadClients(){
+  currentClients = await api('GET','/clients');
+  document.getElementById('clientsList').innerHTML = currentClients.length ? `<table><tr><th>Имя</th><th>Сервер</th><th>Address</th><th>Public key</th><th>Источник</th><th></th></tr>${currentClients.map(c=>`<tr>
+    <td>${esc(c.name)}</td><td>${esc(c.server_name)}</td><td><code>${esc(c.address||'-')}</code></td><td><code>${esc(c.pubkey ? c.pubkey.slice(0,18)+'...' : '-')}</code></td><td>${c._from_server?'<span class="warn">synced</span>':'managed'}</td>
+    <td class="row-actions">${c.privkey?`<a href="${API}/clients/${esc(c.id)}/config" target="_blank"><button class="small">Config</button></a><button class="small" onclick="showQr('${esc(c.id)}')">QR</button>`:'<span class="muted" title="Импортирован с сервера, приватный ключ неизвестен">нет private key</span>'}<button class="small" onclick="editClient('${esc(c.id)}')">Edit</button><button class="small danger" onclick="delClient('${esc(c.id)}')">Del</button></td></tr>`).join('')}</table>` : '<p class="muted">Клиентов пока нет.</p>';
+}
+
+document.getElementById('serverVersion').addEventListener('change', e => { const p = document.querySelector('[name="wg_port"]'); if(!p.value) p.placeholder = e.target.value==='1.5'?'UDP порт (обычно 872x)':'UDP порт (обычно 972x)'; });
+document.getElementById('serverForm').addEventListener('submit', async e=>{
+  e.preventDefault(); const fd=new FormData(e.target); const body={}; for(const [k,v] of fd.entries()) body[k]=v; body.validate = fd.get('validate') === 'on';
+  try { const j=await api('POST','/servers',body); toast('Сервер добавлен: '+j.server.name); e.target.reset(); await loadAll(); }
+  catch(err){ toast('Не добавил сервер: '+err.message+'\n'+JSON.stringify(err.data||{},null,2), true); }
+});
+document.getElementById('clientForm').addEventListener('submit', async e=>{
+  e.preventDefault(); const fd=new FormData(e.target); const body={}; for(const [k,v] of fd.entries()) body[k]=v;
+  try { const j=await api('POST','/clients',body); toast('Клиент добавлен: '+j.client.name); e.target.reset(); await loadAll(); }
+  catch(err){ toast('Не добавил клиента: '+err.message+'\n'+JSON.stringify(err.data||{},null,2), true); }
+});
+async function syncServer(id){ try { const j=await api('POST','/servers/'+id+'/sync'); toast(`Sync OK: peers=${j.peers}, added=${j.added}`); await loadClients(); } catch(e){ toast('Sync failed: '+e.message,true); } }
+async function delServer(id){ if(!confirm('Удалить сервер только из базы панели? Реальный сервер не трогаем.')) return; try{await api('DELETE','/servers/'+id); toast('Сервер удалён из панели'); await loadAll();}catch(e){toast(e.message,true);} }
+async function delClient(id){ if(!confirm('Удалить клиента с сервера и из панели? Будет backup config и restart AWG-контейнера.')) return; try{await api('DELETE','/clients/'+id); toast('Клиент удалён'); await loadAll();}catch(e){toast('Не удалил клиента: '+e.message+'\n'+JSON.stringify(e.data||{},null,2),true);} }
+function showQr(id){ window.open(API + '/clients/' + encodeURIComponent(id) + '/qr.png', '_blank'); }
+let editingId = null;
+
+function openModal(id) { document.getElementById(id).classList.add('active'); }
+function closeModal(id) { document.getElementById(id).classList.remove('active'); editingId = null; }
+
+function editServer(id) {
+  const s = currentServers[id]; if (!s) return;
+  editingId = id;
+  const f = document.getElementById('editServerForm');
+  f.elements['id'].value = s.id;
+  ['name','host','ssh_user','ssh_port','ssh_key','wg_port','endpoint','subnet','dns','container','interface','config_path'].forEach(k => {
+    if (f.elements[k]) f.elements[k].value = s[k] || '';
+  });
+  openModal('editServerModal');
+}
+function editClient(id) {
+  const c = currentClients.find(x => x.id === id); if (!c) return;
+  editingId = id;
+  const f = document.getElementById('editClientForm');
+  f.elements['id'].value = c.id;
+  ['name','address','allowed_ips','preshared_key'].forEach(k => f.elements[k].value = c[k] || '');
+  openModal('editClientModal');
+}
+
+document.getElementById('editServerForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const fd = new FormData(e.target); const body = {};
+  ['name','host','ssh_user','ssh_port','ssh_key','wg_port','endpoint','subnet','dns','container','interface','config_path'].forEach(k => { if (fd.has(k)) body[k] = fd.get(k); });
+  try { const j = await api('PUT','/servers/'+editingId, body); toast('Сервер обновлён: '+j.server.name); closeModal('editServerModal'); await loadAll(); }
+  catch(err){ toast('Не обновил сервер: '+err.message+'\n'+JSON.stringify(err.data||{},null,2), true); }
+});
+
+document.getElementById('editClientForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const fd = new FormData(e.target); const body = {};
+  ['name','address','allowed_ips','preshared_key'].forEach(k => body[k] = fd.get(k));
+  try { const j = await api('PUT','/clients/'+editingId, body); toast('Клиент обновлён: '+j.client.name); closeModal('editClientModal'); await loadAll(); }
+  catch(err){ toast('Не обновил клиента: '+err.message+'\n'+JSON.stringify(err.data||{},null,2), true); }
+});
+
+refreshAuth().catch(e=>toast('Ошибка инициализации: '+e.message, true));
+</script>
+</body>
+</html>

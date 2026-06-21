@@ -1,4 +1,4 @@
-from __future__ import annotations
+import random; import time
 
 import base64
 import hashlib
@@ -864,6 +864,10 @@ def update_client_stat(server: dict[str, Any], client: dict[str, Any], peer: dic
 
 
 def poll_server_stats(server: dict[str, Any]) -> dict[str, Any]:
+    # Periodically refresh server metadata from remote config
+    if random.random() < 0.1:  # 10% chance per poll cycle
+        refresh_server_metadata_from_remote(server)
+        
     tools = version_defaults(server["version"])["show_tools"]
     result = {"ok": False, "server_id": server["id"], "updated": 0, "error": "not tried"}
     dump = None
@@ -1253,3 +1257,4 @@ start_poller_once()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5173")), debug=os.environ.get("FLASK_DEBUG", "0") == "1")
+import random

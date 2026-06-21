@@ -312,3 +312,17 @@ curl -I http://127.0.0.1:8095/
 ## UI Screenshots
 
 ![AWG Web GUI Clients View](https://raw.githubusercontent.com/sllikmll/awg-web-gui/main/docs/ui-clients.png)
+
+
+## Features
+
+- **Auto-detect server settings** - No need to manually enter version, port, subnet, or DNS
+- **SSH key or password auth** - Flexible authentication options
+- **Auto-sync existing peers** - Import existing clients and private keys automatically
+- **Client management** - Add, edit, delete clients with QR code/config export
+- **Monitoring & traffic accounting** - Real-time status, handshake, RX/TX stats
+- **SQLite backend** - Persistent storage for servers, clients, and stats
+- **Docker deployment** - Ready-to-use Docker image with compose example
+- **Periodic metadata refresh** - Auto-update server settings from remote config
+- **Health diagnostics** - Check SSH, NAT, IP forwarding status
+- **Web UI** - Clean, responsive interface for all operations

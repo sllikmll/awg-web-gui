@@ -123,3 +123,4 @@ def test_detected_server_without_dns_keeps_safe_default(tmp_path, monkeypatch):
     assert detected["subnet"] == "10.8.7.0/24"
     assert detected["wg_port"] == 8727
     assert detected["dns"] == "1.1.1.1,8.8.8.8"
+

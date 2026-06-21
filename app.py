@@ -458,6 +458,50 @@ def refresh_server_metadata_from_remote(server: dict[str, Any]) -> dict[str, Any
     return server
 
 
+
+
+def sync_server_peers(server_id: str) -> dict[str, Any]:
+    """Sync existing peers from server config to local DB."""
+    s = SERVERS.get(server_id)
+    if not s:
+        return {"ok": False, "error": "server not found"}
+    conf = read_server_conf(s)
+    if not conf:
+        return {"ok": False, "error": "cannot read server config"}
+    peers = parse_peer_blocks(conf)
+    known_private = private_keys_from_clients_table(s)
+    runtime = runtime_show(s)
+    added = 0
+    enriched = 0
+    by_pub = {c.get("pubkey"): c for c in CLIENTS if c.get("server_id") == server_id}
+    for p in peers:
+        pub = p.get("PublicKey")
+        if not pub:
+            continue
+        meta = known_private.get(pub, {})
+        if pub in by_pub:
+            by_pub[pub]["server_allowed_ips"] = p.get("AllowedIPs", "")
+            if meta.get("privkey") and not by_pub[pub].get("privkey"):
+                by_pub[pub]["privkey"] = meta["privkey"]
+                enriched += 1
+            if meta.get("preshared_key") and not by_pub[pub].get("preshared_key"):
+                by_pub[pub]["preshared_key"] = meta["preshared_key"]
+        else:
+            CLIENTS.append({
+                "id": str(uuid.uuid4())[:8],
+                "server_id": server_id,
+                "name": meta.get("name") or f"existing_{pub[:8]}",
+                "privkey": meta.get("privkey", ""),
+                "pubkey": pub,
+                "preshared_key": meta.get("preshared_key") or p.get("PresharedKey", ""),
+                "address": p.get("AllowedIPs", ""),
+                "server_allowed_ips": p.get("AllowedIPs", ""),
+                "created_at": now(),
+                "updated_at": now(),
+            })
+            added += 1
+    persist()
+    return {"ok": True, "added": added, "enriched": enriched}
 def detect_awg_servers(data: dict[str, Any]) -> list[dict[str, Any]]:
     base = server_access_base(data)
     if not base.get("name") or not base.get("host"):
@@ -947,7 +991,15 @@ def add_server():
             s = normalize_server(data, server_conf=server_conf)
         SERVERS[s["id"]] = s
         persist()
-        return jsonify({"ok": True, "server": s, "servers": [s]})
+        # Auto-sync existing peers if requested
+        if data.get("auto_sync", True):
+            try:
+                sync_result = sync_server_peers(s["id"])
+            except Exception:
+                sync_result = {"ok": False, "error": "auto-sync failed"}
+        else:
+            sync_result = {"ok": True, "skipped": True}
+        return jsonify({"ok": True, "server": s, "servers": [s], "sync": sync_result})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 

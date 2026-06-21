@@ -216,13 +216,13 @@ handshake/runtime peers exist, but NAT rules do not mention server subnet
 [
   {
     "name": "admrus",
-    "host": "138.16.227.27",
+    "host": "127.0.0.1",
     "ssh_user": "root",
     "ssh_key": "/ssh/id_ed25519"
   },
   {
     "name": "admpol",
-    "host": "78.17.118.69",
+    "host": "127.0.0.1",
     "ssh_user": "root",
     "ssh_key": "/ssh/id_ed25519"
   }

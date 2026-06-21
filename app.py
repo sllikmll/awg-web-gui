@@ -9,7 +9,10 @@ import os
 import re
 import secrets
 import shlex
+import sqlite3
 import subprocess
+import threading
+import time
 import uuid
 from datetime import datetime
 from functools import wraps
@@ -28,6 +31,10 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 SERVERS_FILE = DATA_DIR / "servers.json"
 CLIENTS_FILE = DATA_DIR / "clients.json"
 USERS_FILE = DATA_DIR / "users.json"
+DB_FILE = DATA_DIR / "awg-web-gui.db"
+POLL_INTERVAL = int(os.environ.get("AWG_POLL_INTERVAL", "30"))
+ONLINE_THRESHOLD = int(os.environ.get("AWG_ONLINE_THRESHOLD", "180"))
+ENABLE_POLLER = os.environ.get("AWG_ENABLE_POLLER", "1") == "1"
 
 DEFAULT_ADMIN = {"username": "admin", "password_hash": hashlib.sha256(b"admin").hexdigest()}
 
@@ -71,15 +78,149 @@ def save_json(path: Path, data: Any) -> None:
     tmp.replace(path)
 
 
-SERVERS: dict[str, dict[str, Any]] = load_json(SERVERS_FILE, {})
-CLIENTS: list[dict[str, Any]] = load_json(CLIENTS_FILE, [])
-USERS: list[dict[str, str]] = load_json(USERS_FILE, [DEFAULT_ADMIN])
+def db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_FILE, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def init_db() -> None:
+    with db() as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS servers (
+              id TEXT PRIMARY KEY,
+              data TEXT NOT NULL,
+              created_at TEXT,
+              updated_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS clients (
+              id TEXT PRIMARY KEY,
+              server_id TEXT NOT NULL,
+              pubkey TEXT,
+              data TEXT NOT NULL,
+              created_at TEXT,
+              updated_at TEXT,
+              FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_clients_server ON clients(server_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_server_pubkey ON clients(server_id, pubkey) WHERE pubkey IS NOT NULL AND pubkey != '';
+            CREATE TABLE IF NOT EXISTS users (
+              username TEXT PRIMARY KEY,
+              password_hash TEXT NOT NULL,
+              data TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS client_stats (
+              client_id TEXT PRIMARY KEY,
+              server_id TEXT NOT NULL,
+              public_key TEXT NOT NULL,
+              endpoint TEXT,
+              allowed_ips TEXT,
+              latest_handshake INTEGER DEFAULT 0,
+              transfer_rx INTEGER DEFAULT 0,
+              transfer_tx INTEGER DEFAULT 0,
+              last_rx INTEGER DEFAULT 0,
+              last_tx INTEGER DEFAULT 0,
+              total_rx INTEGER DEFAULT 0,
+              total_tx INTEGER DEFAULT 0,
+              online INTEGER DEFAULT 0,
+              last_seen_at TEXT,
+              updated_at TEXT,
+              FOREIGN KEY(client_id) REFERENCES clients(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_stats_server ON client_stats(server_id);
+            CREATE TABLE IF NOT EXISTS events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              ts TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              server_id TEXT,
+              client_id TEXT,
+              message TEXT,
+              data TEXT
+            );
+            CREATE TABLE IF NOT EXISTS settings (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            """
+        )
+
+
+def load_servers_from_db() -> dict[str, dict[str, Any]]:
+    with db() as conn:
+        rows = conn.execute("SELECT data FROM servers ORDER BY created_at, id").fetchall()
+    return {item["id"]: item for item in (json.loads(r["data"]) for r in rows)}
+
+
+def load_clients_from_db() -> list[dict[str, Any]]:
+    with db() as conn:
+        rows = conn.execute("SELECT data FROM clients ORDER BY created_at, id").fetchall()
+    return [json.loads(r["data"]) for r in rows]
+
+
+def load_users_from_db() -> list[dict[str, str]]:
+    with db() as conn:
+        rows = conn.execute("SELECT data FROM users ORDER BY username").fetchall()
+    return [json.loads(r["data"]) for r in rows] or [DEFAULT_ADMIN]
+
+
+def write_event(kind: str, server_id: str | None = None, client_id: str | None = None, message: str = "", data: Any = None) -> None:
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO events(ts,kind,server_id,client_id,message,data) VALUES(?,?,?,?,?,?)",
+            (now(), kind, server_id, client_id, message, json.dumps(data, ensure_ascii=False) if data is not None else None),
+        )
 
 
 def persist() -> None:
+    with db() as conn:
+        conn.execute("DELETE FROM servers")
+        conn.execute("DELETE FROM clients")
+        conn.execute("DELETE FROM users")
+        for srv in SERVERS.values():
+            conn.execute(
+                "INSERT OR REPLACE INTO servers(id,data,created_at,updated_at) VALUES(?,?,?,?)",
+                (srv["id"], json.dumps(srv, ensure_ascii=False), srv.get("created_at"), srv.get("updated_at")),
+            )
+        for client in CLIENTS:
+            conn.execute(
+                "INSERT OR REPLACE INTO clients(id,server_id,pubkey,data,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                (client["id"], client.get("server_id"), client.get("pubkey"), json.dumps(client, ensure_ascii=False), client.get("created_at"), client.get("updated_at")),
+            )
+        for user in USERS:
+            conn.execute(
+                "INSERT OR REPLACE INTO users(username,password_hash,data) VALUES(?,?,?)",
+                (user["username"], user["password_hash"], json.dumps(user, ensure_ascii=False)),
+            )
+    # Keep legacy JSON exports for easy backup/debug while SQLite is authoritative.
     save_json(SERVERS_FILE, SERVERS)
     save_json(CLIENTS_FILE, CLIENTS)
     save_json(USERS_FILE, USERS)
+
+
+def migrate_json_to_sqlite_if_empty() -> None:
+    with db() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM servers").fetchone()[0]
+    if count == 0:
+        legacy_servers = load_json(SERVERS_FILE, {})
+        legacy_clients = load_json(CLIENTS_FILE, [])
+        legacy_users = load_json(USERS_FILE, [DEFAULT_ADMIN])
+        if legacy_servers or legacy_clients or legacy_users != [DEFAULT_ADMIN]:
+            globals()["SERVERS"] = legacy_servers
+            globals()["CLIENTS"] = legacy_clients
+            globals()["USERS"] = legacy_users
+            persist()
+            write_event("migration", message="Migrated legacy JSON data to SQLite")
+
+
+init_db()
+migrate_json_to_sqlite_if_empty()
+SERVERS: dict[str, dict[str, Any]] = load_servers_from_db()
+CLIENTS: list[dict[str, Any]] = load_clients_from_db()
+USERS: list[dict[str, str]] = load_users_from_db()
 
 
 def version_defaults(version: str) -> dict[str, Any]:
@@ -437,6 +578,149 @@ def apply_client_to_server(server: dict[str, Any], client: dict[str, Any], remov
     return wait_for_peer(server, client["pubkey"], remove=remove, timeout=30, delay=1.0)
 
 
+def parse_wg_dump(dump: str, now_ts: int | None = None, online_threshold: int = ONLINE_THRESHOLD) -> list[dict[str, Any]]:
+    """Parse `wg show <iface> dump` / `awg show <iface> dump` output.
+
+    Returns peer rows only. First dump row is interface metadata.
+    """
+    now_ts = int(now_ts or time.time())
+    peers: list[dict[str, Any]] = []
+    for raw in dump.splitlines():
+        if not raw.strip():
+            continue
+        cols = raw.rstrip("\n").split("\t")
+        if len(cols) < 8:
+            continue
+        # Interface row has private key, public key, listen port, fwmark.
+        if len(cols) == 4:
+            continue
+        pubkey, psk, endpoint, allowed_ips, handshake, rx, tx, keepalive = cols[:8]
+        try:
+            hs = int(handshake or 0)
+            rx_i = int(rx or 0)
+            tx_i = int(tx or 0)
+        except ValueError:
+            continue
+        online = bool(hs and (now_ts - hs) <= online_threshold)
+        peers.append({
+            "public_key": pubkey,
+            "endpoint": "" if endpoint == "(none)" else endpoint,
+            "allowed_ips": allowed_ips,
+            "latest_handshake": hs,
+            "transfer_rx": rx_i,
+            "transfer_tx": tx_i,
+            "online": online,
+            "last_seen_at": datetime.fromtimestamp(hs).isoformat(timespec="seconds") if hs else "",
+        })
+    return peers
+
+
+def compute_counter_delta(old: int, new: int) -> int:
+    old = int(old or 0)
+    new = int(new or 0)
+    return new - old if new >= old else new
+
+
+def stats_by_client_id() -> dict[str, dict[str, Any]]:
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM client_stats").fetchall()
+    return {r["client_id"]: dict(r) for r in rows}
+
+
+def update_client_stat(server: dict[str, Any], client: dict[str, Any], peer: dict[str, Any]) -> dict[str, Any]:
+    cid = client["id"]
+    with db() as conn:
+        old = conn.execute("SELECT * FROM client_stats WHERE client_id=?", (cid,)).fetchone()
+        old_rx = old["last_rx"] if old else 0
+        old_tx = old["last_tx"] if old else 0
+        total_rx = (old["total_rx"] if old else 0) + compute_counter_delta(old_rx, peer["transfer_rx"])
+        total_tx = (old["total_tx"] if old else 0) + compute_counter_delta(old_tx, peer["transfer_tx"])
+        row = {
+            "client_id": cid,
+            "server_id": server["id"],
+            "public_key": peer["public_key"],
+            "endpoint": peer.get("endpoint", ""),
+            "allowed_ips": peer.get("allowed_ips", ""),
+            "latest_handshake": int(peer.get("latest_handshake") or 0),
+            "transfer_rx": int(peer.get("transfer_rx") or 0),
+            "transfer_tx": int(peer.get("transfer_tx") or 0),
+            "last_rx": int(peer.get("transfer_rx") or 0),
+            "last_tx": int(peer.get("transfer_tx") or 0),
+            "total_rx": total_rx,
+            "total_tx": total_tx,
+            "online": 1 if peer.get("online") else 0,
+            "last_seen_at": peer.get("last_seen_at", ""),
+            "updated_at": now(),
+        }
+        conn.execute(
+            """
+            INSERT INTO client_stats(client_id,server_id,public_key,endpoint,allowed_ips,latest_handshake,transfer_rx,transfer_tx,last_rx,last_tx,total_rx,total_tx,online,last_seen_at,updated_at)
+            VALUES(:client_id,:server_id,:public_key,:endpoint,:allowed_ips,:latest_handshake,:transfer_rx,:transfer_tx,:last_rx,:last_tx,:total_rx,:total_tx,:online,:last_seen_at,:updated_at)
+            ON CONFLICT(client_id) DO UPDATE SET
+              endpoint=excluded.endpoint, allowed_ips=excluded.allowed_ips, latest_handshake=excluded.latest_handshake,
+              transfer_rx=excluded.transfer_rx, transfer_tx=excluded.transfer_tx, last_rx=excluded.last_rx, last_tx=excluded.last_tx,
+              total_rx=excluded.total_rx, total_tx=excluded.total_tx, online=excluded.online, last_seen_at=excluded.last_seen_at,
+              updated_at=excluded.updated_at
+            """,
+            row,
+        )
+    return row
+
+
+def poll_server_stats(server: dict[str, Any]) -> dict[str, Any]:
+    tools = version_defaults(server["version"])["show_tools"]
+    result = {"ok": False, "server_id": server["id"], "updated": 0, "error": "not tried"}
+    dump = None
+    for tool in tools:
+        r = cexec(server, f"{tool} show {q(server['interface'])} dump", timeout=20)
+        if r["ok"]:
+            dump = r["out"]
+            break
+        result["error"] = r.get("err") or r.get("out") or "dump failed"
+    if dump is None:
+        write_event("poll_error", server_id=server["id"], message=result["error"])
+        return result
+    peers = parse_wg_dump(dump)
+    clients_by_pub = {c.get("pubkey"): c for c in CLIENTS if c.get("server_id") == server["id"] and c.get("pubkey")}
+    updated = 0
+    for peer in peers:
+        client = clients_by_pub.get(peer["public_key"])
+        if client:
+            update_client_stat(server, client, peer)
+            updated += 1
+    write_event("poll", server_id=server["id"], message=f"Updated {updated} client stats", data={"peers": len(peers), "updated": updated})
+    return {"ok": True, "server_id": server["id"], "peers": len(peers), "updated": updated}
+
+
+def poll_all_stats_once() -> list[dict[str, Any]]:
+    results = []
+    for server in list(SERVERS.values()):
+        results.append(poll_server_stats(server))
+    return results
+
+
+def poll_loop() -> None:
+    while True:
+        try:
+            poll_all_stats_once()
+        except Exception as e:
+            try:
+                write_event("poll_error", message=str(e))
+            except Exception:
+                pass
+        time.sleep(max(5, POLL_INTERVAL))
+
+
+def start_poller_once() -> None:
+    if not ENABLE_POLLER or os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    # Avoid Flask reloader double-start and allow disabling in tests.
+    if getattr(app, "_awg_poller_started", False):
+        return
+    app._awg_poller_started = True
+    threading.Thread(target=poll_loop, name="awg-stats-poller", daemon=True).start()
+
+
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -584,9 +868,11 @@ def sync_server(sid):
 @login_required
 def list_clients():
     result = []
+    stats = stats_by_client_id()
     for c in CLIENTS:
         item = dict(c)
         item["server_name"] = SERVERS.get(c.get("server_id"), {}).get("name", "?")
+        item["stats"] = stats.get(c.get("id"), {})
         result.append(item)
     return jsonify(result)
 
@@ -664,6 +950,44 @@ def delete_client(cid):
     return jsonify({"ok": True})
 
 
+@app.route("/api/stats")
+@login_required
+def all_stats():
+    return jsonify(stats_by_client_id())
+
+
+@app.route("/api/servers/<sid>/stats")
+@login_required
+def server_stats(sid):
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM client_stats WHERE server_id=?", (sid,)).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/servers/<sid>/poll", methods=["POST"])
+@login_required
+def poll_server_now(sid):
+    s = SERVERS.get(sid)
+    if not s:
+        return jsonify({"ok": False, "error": "not found"}), 404
+    return jsonify(poll_server_stats(s))
+
+
+@app.route("/api/poll", methods=["POST"])
+@login_required
+def poll_now():
+    return jsonify({"ok": True, "results": poll_all_stats_once()})
+
+
+@app.route("/api/events")
+@login_required
+def list_events():
+    limit = min(int(request.args.get("limit", "100")), 500)
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
 @app.route("/api/clients/<cid>/config")
 @login_required
 def client_config(cid):
@@ -696,6 +1020,9 @@ def client_qr(cid):
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue(), 200, {"Content-Type": "image/png"}
+
+
+start_poller_once()
 
 
 if __name__ == "__main__":

@@ -146,6 +146,95 @@ awg-web-gui/
 
 MIT
 
+
+## SQLite, мониторинг и traffic accounting
+
+Начиная с Docker/MVP-версии приложение хранит рабочие данные в SQLite:
+
+```text
+/data/awg-web-gui.db
+```
+
+При первом запуске старые JSON-файлы `servers.json`, `clients.json`, `users.json` автоматически мигрируются в SQLite. JSON-файлы продолжают обновляться как удобный legacy-export для ручной проверки и резервного копирования, но основной источник данных — SQLite.
+
+### Что хранится в базе
+
+| Таблица | Назначение |
+| :--- | :--- |
+| `servers` | добавленные AWG-серверы и параметры SSH/Docker |
+| `clients` | клиенты/пиры и данные для генерации конфигов |
+| `users` | локальные пользователи GUI |
+| `client_stats` | last handshake, endpoint, online/offline, RX/TX, total RX/TX |
+| `events` | события миграций, polling, ошибок опроса |
+| `settings` | служебные настройки |
+
+### Мониторинг клиентов
+
+Фоновый poller опрашивает каждый сервер через SSH:
+
+```bash
+# AWG 1.5
+docker exec amnezia-awg wg show wg0 dump
+
+# AWG 2.0
+docker exec amnezia-awg2 awg show awg0 dump
+```
+
+Из `dump` читаются:
+
+- `endpoint` клиента;
+- `latest_handshake`;
+- текущие `transfer_rx` / `transfer_tx`;
+- online/offline статус.
+
+Клиент считается online, если последний handshake был не старше `AWG_ONLINE_THRESHOLD` секунд.
+
+### Настройки polling
+
+| Переменная | Значение по умолчанию | Описание |
+| :--- | :---: | :--- |
+| `AWG_POLL_INTERVAL` | `30` | период фонового опроса серверов, секунд |
+| `AWG_ONLINE_THRESHOLD` | `180` | сколько секунд после handshake клиент считается online |
+| `AWG_ENABLE_POLLER` | `1` | `0` отключает фоновый poller |
+
+### Подсчёт трафика
+
+WireGuard/AWG counters могут сбрасываться после restart контейнера. Поэтому GUI хранит:
+
+- `transfer_rx` / `transfer_tx` — текущие значения из runtime;
+- `total_rx` / `total_tx` — накопленные значения в SQLite.
+
+Если новый counter меньше предыдущего, приложение считает это reset и добавляет новое значение как delta.
+
+
+## Готовый Docker image
+
+После push в `main` GitHub Actions собирает образ:
+
+```text
+ghcr.io/sllikmll/awg-web-gui:latest
+```
+
+Пример запуска без локальной сборки:
+
+```yaml
+services:
+  awg-web-gui:
+    image: ghcr.io/sllikmll/awg-web-gui:latest
+    container_name: awg-web-gui
+    restart: unless-stopped
+    environment:
+      AWG_SECRET_KEY: "change-me-long-random-string"
+      AWG_DATA_DIR: /data
+      AWG_POLL_INTERVAL: "30"
+      AWG_ONLINE_THRESHOLD: "180"
+    ports:
+      - "8095:5173"
+    volumes:
+      - ./data:/data
+      - ./ssh:/ssh:ro
+```
+
 ## Запуск в Docker
 
 В репозитории есть `Dockerfile` и пример `docker-compose.example.yml`.

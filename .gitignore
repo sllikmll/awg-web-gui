@@ -13,3 +13,9 @@ Thumbs.db
 backup-*/
 .vscode/
 .idea/
+
+.testvenv/
+*.db
+*.db-*
+*.bak-sqlite-*
+*.bak-stats-*

@@ -95,6 +95,17 @@
       <div class="hint">При добавлении делается backup remote config, запись peer в config и restart только AWG-контейнера.</div>
       <div id="clientsList"></div>
     </section>
+
+    <section class="card">
+      <div class="top" style="margin-bottom:0">
+        <div>
+          <h2 style="margin:0">Мониторинг и трафик</h2>
+          <div class="muted">Online, last handshake, endpoint, RX/TX и накопительный трафик по клиентам.</div>
+        </div>
+        <button class="secondary" onclick="pollNow()">Обновить сейчас</button>
+      </div>
+      <div id="statsList"></div>
+    </section>
   </main>
 </div>
 
@@ -144,6 +155,8 @@ let currentServers = {};
 let currentClients = [];
 
 function esc(s) { return String(s ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
+function fmtBytes(n) { n=Number(n||0); const u=['B','KB','MB','GB','TB']; let i=0; while(n>=1024 && i<u.length-1){n/=1024;i++;} return (i? n.toFixed(1): String(n))+' '+u[i]; }
+function fmtTime(ts) { if(!ts) return '-'; const d=new Date(String(ts).replace(' ','T')); return isNaN(d) ? String(ts) : d.toLocaleString(); }
 function toast(msg, isErr=false) { const t=document.getElementById('toast'); t.textContent=msg; t.classList.remove('hidden'); t.style.borderColor=isErr?'#fecaca':'#bbf7d0'; clearTimeout(window.__toast); window.__toast=setTimeout(()=>t.classList.add('hidden'), isErr?12000:5000); }
 async function api(method, path, body) {
   const opts = {method, credentials:'same-origin', headers:{}};
@@ -170,14 +183,14 @@ document.getElementById('loginForm').addEventListener('submit', async e => {
 });
 async function logout(){ await api('POST','/logout'); await refreshAuth(); }
 
-async function loadAll(){ await loadServers(); await loadClients(); }
+async function loadAll(){ await loadServers(); await loadClients(); renderStats(); }
 async function loadServers(){
   currentServers = await api('GET','/servers');
   const arr = Object.values(currentServers);
   document.getElementById('clientServer').innerHTML = arr.length ? arr.map(s=>`<option value="${esc(s.id)}">${esc(s.name)} (${esc(s.version)})</option>`).join('') : '<option disabled>Нет серверов</option>';
   document.getElementById('serversList').innerHTML = arr.length ? `<table><tr><th>Название</th><th>Host</th><th>Версия</th><th>Контейнер</th><th>Порт</th><th>Статус</th><th></th></tr>${arr.map(s=>`<tr>
     <td>${esc(s.name)}</td><td>${esc(s.host)}</td><td><span class="badge">${esc(s.version)}</span></td><td><code>${esc(s.container)}/${esc(s.interface)}</code></td><td>${esc(s.wg_port)}</td><td id="status_${esc(s.id)}" class="muted">...</td>
-    <td class="row-actions"><button class="small" onclick="editServer('${esc(s.id)}')">Edit</button><button class="small" onclick="health('${esc(s.id)}')">Health</button><button class="small" onclick="syncServer('${esc(s.id)}')">Sync</button><button class="small danger" onclick="delServer('${esc(s.id)}')">Del</button></td></tr>`).join('')}</table>` : '<p class="muted">Серверов пока нет.</p>';
+    <td class="row-actions"><button class="small" onclick="editServer('${esc(s.id)}')">Edit</button><button class="small" onclick="health('${esc(s.id)}')">Health</button><button class="small" onclick="syncServer('${esc(s.id)}')">Sync</button><button class="small" onclick="pollServer('${esc(s.id)}')">Poll</button><button class="small danger" onclick="delServer('${esc(s.id)}')">Del</button></td></tr>`).join('')}</table>` : '<p class="muted">Серверов пока нет.</p>';
   arr.forEach(s=>health(s.id, true));
 }
 async function health(id, silent=false){
@@ -187,10 +200,23 @@ async function health(id, silent=false){
 }
 async function loadClients(){
   currentClients = await api('GET','/clients');
-  document.getElementById('clientsList').innerHTML = currentClients.length ? `<table><tr><th>Имя</th><th>Сервер</th><th>Address</th><th>Public key</th><th>Источник</th><th></th></tr>${currentClients.map(c=>`<tr>
-    <td>${esc(c.name)}</td><td>${esc(c.server_name)}</td><td><code>${esc(c.address||'-')}</code></td><td><code>${esc(c.pubkey ? c.pubkey.slice(0,18)+'...' : '-')}</code></td><td>${c._from_server?'<span class="warn">synced</span>':'managed'}</td>
-    <td class="row-actions">${c.privkey?`<a href="${API}/clients/${esc(c.id)}/config" target="_blank"><button class="small">Config</button></a><button class="small" onclick="showQr('${esc(c.id)}')">QR</button>`:'<span class="muted" title="Импортирован с сервера, приватный ключ неизвестен">нет private key</span>'}<button class="small" onclick="editClient('${esc(c.id)}')">Edit</button><button class="small danger" onclick="delClient('${esc(c.id)}')">Del</button></td></tr>`).join('')}</table>` : '<p class="muted">Клиентов пока нет.</p>';
+  document.getElementById('clientsList').innerHTML = currentClients.length ? `<table><tr><th>Имя</th><th>Сервер</th><th>Address</th><th>Public key</th><th>Online</th><th>Handshake</th><th>Traffic</th><th></th></tr>${currentClients.map(c=>{
+    const st=c.stats||{};
+    const online=st.online ? '<span class="ok">online</span>' : '<span class="bad">offline</span>';
+    const traffic=`${fmtBytes(st.total_rx)} ↓ / ${fmtBytes(st.total_tx)} ↑`;
+    return `<tr>
+    <td>${esc(c.name)}</td><td>${esc(c.server_name)}</td><td><code>${esc(c.address||'-')}</code></td><td><code>${esc(c.pubkey ? c.pubkey.slice(0,18)+'...' : '-')}</code></td><td>${st.public_key?online:'-'}</td><td>${fmtTime(st.last_seen_at)}</td><td>${traffic}</td>
+    <td class="row-actions">${c.privkey?`<a href="${API}/clients/${esc(c.id)}/config" target="_blank"><button class="small">Config</button></a><button class="small" onclick="showQr('${esc(c.id)}')">QR</button>`:'<span class="muted" title="Импортирован с сервера, приватный ключ неизвестен">нет private key</span>'}<button class="small" onclick="editClient('${esc(c.id)}')">Edit</button><button class="small danger" onclick="delClient('${esc(c.id)}')">Del</button></td></tr>`}).join('')}</table>` : '<p class="muted">Клиентов пока нет.</p>';
+  renderStats();
 }
+
+function renderStats(){
+  const rows = currentClients.map(c => ({...c, st:c.stats||{}})).filter(x => x.st.public_key);
+  document.getElementById('statsList').innerHTML = rows.length ? `<table><tr><th>Клиент</th><th>Сервер</th><th>Статус</th><th>Endpoint</th><th>Last handshake</th><th>Session RX/TX</th><th>Total RX/TX</th><th>Updated</th></tr>${rows.map(x=>`<tr><td>${esc(x.name)}</td><td>${esc(x.server_name)}</td><td>${x.st.online?'<span class="ok">🟢 online</span>':'<span class="bad">🔴 offline</span>'}</td><td><code>${esc(x.st.endpoint||'-')}</code></td><td>${fmtTime(x.st.last_seen_at)}</td><td>${fmtBytes(x.st.transfer_rx)} ↓ / ${fmtBytes(x.st.transfer_tx)} ↑</td><td><b>${fmtBytes(x.st.total_rx)} ↓ / ${fmtBytes(x.st.total_tx)} ↑</b></td><td>${fmtTime(x.st.updated_at)}</td></tr>`).join('')}</table>` : '<p class="muted">Статистики пока нет. Нажмите Poll на сервере или дождитесь фонового опроса.</p>';
+}
+async function pollNow(){ try { const j=await api('POST','/poll'); toast('Poll OK: '+JSON.stringify(j.results)); await loadClients(); } catch(e){ toast('Poll failed: '+e.message,true); } }
+async function pollServer(id){ try { const j=await api('POST','/servers/'+id+'/poll'); toast('Poll server: '+JSON.stringify(j)); await loadClients(); } catch(e){ toast('Poll failed: '+e.message,true); } }
+
 
 document.getElementById('serverVersion').addEventListener('change', e => { const p = document.querySelector('[name="wg_port"]'); if(!p.value) p.placeholder = e.target.value==='1.5'?'UDP порт (обычно 872x)':'UDP порт (обычно 972x)'; });
 document.getElementById('serverForm').addEventListener('submit', async e=>{

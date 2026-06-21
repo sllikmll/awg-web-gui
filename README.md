@@ -308,3 +308,7 @@ docker compose ps
 docker logs --tail 50 awg-web-gui
 curl -I http://127.0.0.1:8095/
 ```
+
+## UI Screenshots
+
+![AWG Web GUI Clients View](https://raw.githubusercontent.com/sllikmll/awg-web-gui/main/docs/ui-clients.png)

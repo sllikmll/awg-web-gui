@@ -145,3 +145,51 @@ awg-web-gui/
 ## Лицензия
 
 MIT
+
+## Запуск в Docker
+
+В репозитории есть `Dockerfile` и пример `docker-compose.example.yml`.
+
+### Быстрый старт
+
+```bash
+git clone https://github.com/sllikmll/awg-web-gui.git
+cd awg-web-gui
+cp docker-compose.example.yml docker-compose.yml
+mkdir -p data ssh
+```
+
+Положите SSH-ключ для доступа к AmneziaWG-серверам в `./ssh/`, например:
+
+```bash
+cp ~/.ssh/id_ed25519 ./ssh/id_ed25519
+chmod 600 ./ssh/id_ed25519
+```
+
+В `docker-compose.yml` замените `AWG_SECRET_KEY` на длинную случайную строку и запустите:
+
+```bash
+docker compose up -d --build
+```
+
+По умолчанию Web UI будет доступен на:
+
+```text
+http://127.0.0.1:8095
+```
+
+Если ключ смонтирован как `./ssh:/ssh:ro`, то в форме добавления сервера указывайте путь к ключу внутри контейнера:
+
+```text
+/ssh/id_ed25519
+```
+
+Данные приложения хранятся в bind mount `./data:/data` и переживают пересоздание контейнера.
+
+### Проверка
+
+```bash
+docker compose ps
+docker logs --tail 50 awg-web-gui
+curl -I http://127.0.0.1:8095/
+```

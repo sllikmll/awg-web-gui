@@ -70,3 +70,15 @@ def test_update_client_stat_accumulates_totals_and_handles_counter_reset(tmp_pat
     assert row["total_tx"] == 270
     assert row["last_rx"] == 10
     assert row["last_tx"] == 20
+
+
+def test_resolve_root_ssh_key_to_mounted_ssh_dir(tmp_path, monkeypatch):
+    app = load_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(app.os.path, "exists", lambda path: path == "/ssh/id_ed25519")
+    assert app.resolve_ssh_key_path("/root/.ssh/id_ed25519") == "/ssh/id_ed25519"
+
+
+def test_public_from_private_matches_generated_keypair(tmp_path, monkeypatch):
+    app = load_app(tmp_path, monkeypatch)
+    priv, pub = app.generate_keypair()
+    assert app.public_from_private(priv) == pub

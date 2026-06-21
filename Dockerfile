@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     AWG_DATA_DIR=/data
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends openssh-client ca-certificates \
+    && apt-get install -y --no-install-recommends openssh-client sshpass ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

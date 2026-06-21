@@ -22,6 +22,7 @@ from typing import Any
 import qrcode
 from flask import Flask, jsonify, render_template, request, session
 from nacl.public import PrivateKey
+from nacl.bindings import crypto_scalarmult_base
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("AWG_SECRET_KEY", "dev-change-me")
@@ -250,6 +251,7 @@ def normalize_server(data: dict[str, Any], existing: dict[str, Any] | None = Non
         "ssh_user": str(data.get("ssh_user", existing.get("ssh_user", "root"))).strip() or "root",
         "ssh_port": int(data.get("ssh_port", existing.get("ssh_port", 22)) or 22),
         "ssh_key": str(data.get("ssh_key", existing.get("ssh_key", ""))).strip(),
+        "ssh_password": str(data.get("ssh_password", existing.get("ssh_password", ""))).strip(),
         "wg_port": int(data.get("wg_port", existing.get("wg_port", d["port"])) or d["port"]),
         "dns": str(data.get("dns", existing.get("dns", "1.1.1.1,8.8.8.8"))).strip(),
         "endpoint": str(data.get("endpoint", existing.get("endpoint", ""))).strip(),
@@ -265,30 +267,58 @@ def normalize_server(data: dict[str, Any], existing: dict[str, Any] | None = Non
     return server
 
 
-def ssh_base_cmd(server: dict[str, Any]) -> list[str]:
-    cmd = [
+def resolve_ssh_key_path(path: str) -> str:
+    """Resolve common host-path mistakes inside Docker.
+
+    The container only sees keys mounted under /ssh. If the user enters a host
+    path like /root/.ssh/id_ed25519, try /ssh/id_ed25519 automatically.
+    """
+    path = (path or "").strip()
+    if not path:
+        return ""
+    if os.path.exists(path):
+        return path
+    alt = "/ssh/" + os.path.basename(path)
+    if path.startswith("/root/.ssh/") and os.path.exists(alt):
+        return alt
+    return path
+
+
+def ssh_base_cmd(server: dict[str, Any]) -> tuple[list[str], dict[str, str] | None]:
+    password = str(server.get("ssh_password") or "")
+    key_path = resolve_ssh_key_path(str(server.get("ssh_key") or ""))
+    ssh = [
         "ssh",
-        "-o", "BatchMode=yes",
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
         "-o", "ConnectTimeout=7",
         "-p", str(server.get("ssh_port", 22)),
     ]
-    if server.get("ssh_key"):
-        cmd += ["-i", server["ssh_key"]]
-    cmd.append(f"{server.get('ssh_user', 'root')}@{server['host']}")
-    return cmd
+    if password:
+        ssh = ["sshpass", "-e"] + ssh
+        ssh += ["-o", "PreferredAuthentications=password,keyboard-interactive,publickey"]
+        env = {**os.environ, "SSHPASS": password}
+    else:
+        ssh += ["-o", "BatchMode=yes"]
+        env = None
+    if key_path:
+        ssh += ["-i", key_path]
+    ssh.append(f"{server.get('ssh_user', 'root')}@{server['host']}")
+    return ssh, env
 
 
 def ssh_run(server: dict[str, Any], command: str, timeout: int = 25) -> dict[str, Any]:
     try:
-        r = subprocess.run(ssh_base_cmd(server) + [command], capture_output=True, text=True, timeout=timeout)
-        return {"ok": r.returncode == 0, "code": r.returncode, "out": r.stdout, "err": r.stderr}
+        cmd, env = ssh_base_cmd(server)
+        r = subprocess.run(cmd + [command], capture_output=True, text=True, timeout=timeout, env=env)
+        err = r.stderr
+        if server.get("ssh_key") and resolve_ssh_key_path(str(server.get("ssh_key"))) != server.get("ssh_key"):
+            err = f"Info: SSH key path mapped {server.get('ssh_key')} -> {resolve_ssh_key_path(str(server.get('ssh_key')))}\n" + err
+        return {"ok": r.returncode == 0, "code": r.returncode, "out": r.stdout, "err": err}
     except subprocess.TimeoutExpired:
         return {"ok": False, "code": -1, "out": "", "err": "timeout"}
     except Exception as e:
         return {"ok": False, "code": -1, "out": "", "err": str(e)}
-
 
 def q(s: str) -> str:
     return shlex.quote(str(s))
@@ -448,6 +478,46 @@ def append_peer_block(conf: str, client: dict[str, Any]) -> str:
 def generate_keypair() -> tuple[str, str]:
     priv = PrivateKey.generate()
     return base64.b64encode(priv.encode()).decode(), base64.b64encode(priv.public_key.encode()).decode()
+
+
+def public_from_private(privkey: str) -> str:
+    raw = base64.b64decode(privkey.strip())
+    return base64.b64encode(crypto_scalarmult_base(raw)).decode()
+
+
+def read_clients_table(server: dict[str, Any]) -> list[dict[str, Any]]:
+    cfg_dir = os.path.dirname(server.get("config_path") or "/opt/amnezia/awg/wg0.conf")
+    r = cexec(server, f"test -f {q(cfg_dir + '/clientsTable')} && cat {q(cfg_dir + '/clientsTable')} || true")
+    if not r["ok"] or not r["out"].strip():
+        return []
+    try:
+        data = json.loads(r["out"])
+    except Exception:
+        return []
+    if isinstance(data, dict):
+        data = list(data.values())
+    return data if isinstance(data, list) else []
+
+
+def private_keys_from_clients_table(server: dict[str, Any]) -> dict[str, dict[str, str]]:
+    result: dict[str, dict[str, str]] = {}
+    for item in read_clients_table(server):
+        if not isinstance(item, dict):
+            continue
+        priv = str(item.get("privateKey") or item.get("private_key") or item.get("clientPrivateKey") or item.get("privkey") or "").strip()
+        pub = str(item.get("publicKey") or item.get("public_key") or item.get("clientPublicKey") or item.get("pubkey") or "").strip()
+        if priv and not pub:
+            try:
+                pub = public_from_private(priv)
+            except Exception:
+                pub = ""
+        if pub:
+            result[pub] = {
+                "privkey": priv,
+                "preshared_key": str(item.get("presharedKey") or item.get("preshared_key") or item.get("psk") or "").strip(),
+                "name": str(item.get("name") or item.get("clientName") or "").strip(),
+            }
+    return result
 
 
 def generate_psk() -> str:
@@ -836,23 +906,31 @@ def sync_server(sid):
     if not conf:
         return jsonify({"ok": False, "error": "cannot read server config"}), 502
     peers = parse_peer_blocks(conf)
+    known_private = private_keys_from_clients_table(s)
     runtime = runtime_show(s)
     added = 0
+    enriched = 0
     by_pub = {c.get("pubkey"): c for c in CLIENTS if c.get("server_id") == sid}
     for p in peers:
         pub = p.get("PublicKey")
         if not pub:
             continue
+        meta = known_private.get(pub, {})
         if pub in by_pub:
             by_pub[pub]["server_allowed_ips"] = p.get("AllowedIPs", "")
+            if meta.get("privkey") and not by_pub[pub].get("privkey"):
+                by_pub[pub]["privkey"] = meta["privkey"]
+                enriched += 1
+            if meta.get("preshared_key") and not by_pub[pub].get("preshared_key"):
+                by_pub[pub]["preshared_key"] = meta["preshared_key"]
         else:
             CLIENTS.append({
                 "id": str(uuid.uuid4())[:8],
                 "server_id": sid,
-                "name": f"existing_{pub[:8]}",
-                "privkey": "",
+                "name": meta.get("name") or f"existing_{pub[:8]}",
+                "privkey": meta.get("privkey", ""),
                 "pubkey": pub,
-                "preshared_key": p.get("PresharedKey", ""),
+                "preshared_key": meta.get("preshared_key") or p.get("PresharedKey", ""),
                 "address": p.get("AllowedIPs", ""),
                 "server_allowed_ips": p.get("AllowedIPs", ""),
                 "allowed_ips": "0.0.0.0/0",
@@ -861,7 +939,7 @@ def sync_server(sid):
             })
             added += 1
     persist()
-    return jsonify({"ok": True, "peers": len(peers), "added": added, "runtime_ok": runtime["ok"]})
+    return jsonify({"ok": True, "peers": len(peers), "added": added, "enriched_private_keys": enriched, "private_key_source": "clientsTable", "runtime_ok": runtime["ok"]})
 
 
 @app.route("/api/clients")
@@ -921,9 +999,11 @@ def update_client(cid):
         return jsonify({"ok": False, "error": "not found"}), 404
     data = request.json or {}
     updated = dict(client)
-    for k in ["name", "allowed_ips", "address", "preshared_key"]:
+    for k in ["name", "allowed_ips", "address", "preshared_key", "privkey"]:
         if k in data:
             updated[k] = data[k]
+    if data.get("privkey") and not updated.get("pubkey"):
+        updated["pubkey"] = public_from_private(data["privkey"])
     s = SERVERS.get(updated.get("server_id"))
     if s and updated.get("pubkey"):
         apply = apply_client_to_server(s, updated, remove=False)

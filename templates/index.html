@@ -70,7 +70,8 @@
         </select>
         <input name="ssh_user" placeholder="SSH user" value="root">
         <input name="ssh_port" type="number" placeholder="SSH port" value="22">
-        <input name="ssh_key" placeholder="Путь к SSH ключу на Windows">
+        <input name="ssh_key" placeholder="Путь к SSH ключу">
+        <input name="ssh_password" type="password" placeholder="SSH пароль вместо ключа">
         <input name="wg_port" type="number" placeholder="UDP порт (872x / 972x)">
         <input name="endpoint" placeholder="Endpoint для клиента, если отличается от host">
         <input name="subnet" placeholder="VPN subnet" value="10.8.0.0/24">
@@ -121,6 +122,7 @@
       <input name="ssh_user" placeholder="SSH user">
       <input name="ssh_port" type="number" placeholder="SSH port">
       <input name="ssh_key" placeholder="Путь к SSH ключу">
+      <input name="ssh_password" type="password" placeholder="SSH пароль вместо ключа">
       <input name="wg_port" type="number" placeholder="UDP порт">
       <input name="endpoint" placeholder="Endpoint">
       <input name="subnet" placeholder="VPN subnet">
@@ -143,6 +145,7 @@
       <input name="address" placeholder="IP клиента">
       <input name="allowed_ips" placeholder="AllowedIPs в клиентском конфиге">
       <input name="preshared_key" placeholder="Preshared key">
+      <input name="privkey" placeholder="Private key клиента, если известен">
       <button type="submit">Сохранить</button>
       <button type="button" class="secondary" onclick="closeModal('editClientModal')">Отмена</button>
     </form>
@@ -243,7 +246,7 @@ function editServer(id) {
   editingId = id;
   const f = document.getElementById('editServerForm');
   f.elements['id'].value = s.id;
-  ['name','host','ssh_user','ssh_port','ssh_key','wg_port','endpoint','subnet','dns','container','interface','config_path'].forEach(k => {
+  ['name','host','ssh_user','ssh_port','ssh_key','ssh_password','wg_port','endpoint','subnet','dns','container','interface','config_path'].forEach(k => {
     if (f.elements[k]) f.elements[k].value = s[k] || '';
   });
   openModal('editServerModal');
@@ -253,14 +256,14 @@ function editClient(id) {
   editingId = id;
   const f = document.getElementById('editClientForm');
   f.elements['id'].value = c.id;
-  ['name','address','allowed_ips','preshared_key'].forEach(k => f.elements[k].value = c[k] || '');
+  ['name','address','allowed_ips','preshared_key','privkey'].forEach(k => f.elements[k].value = c[k] || '');
   openModal('editClientModal');
 }
 
 document.getElementById('editServerForm').addEventListener('submit', async e => {
   e.preventDefault();
   const fd = new FormData(e.target); const body = {};
-  ['name','host','ssh_user','ssh_port','ssh_key','wg_port','endpoint','subnet','dns','container','interface','config_path'].forEach(k => { if (fd.has(k)) body[k] = fd.get(k); });
+  ['name','host','ssh_user','ssh_port','ssh_key','ssh_password','wg_port','endpoint','subnet','dns','container','interface','config_path'].forEach(k => { if (fd.has(k)) body[k] = fd.get(k); });
   try { const j = await api('PUT','/servers/'+editingId, body); toast('Сервер обновлён: '+j.server.name); closeModal('editServerModal'); await loadAll(); }
   catch(err){ toast('Не обновил сервер: '+err.message+'\n'+JSON.stringify(err.data||{},null,2), true); }
 });
@@ -268,7 +271,7 @@ document.getElementById('editServerForm').addEventListener('submit', async e => 
 document.getElementById('editClientForm').addEventListener('submit', async e => {
   e.preventDefault();
   const fd = new FormData(e.target); const body = {};
-  ['name','address','allowed_ips','preshared_key'].forEach(k => body[k] = fd.get(k));
+  ['name','address','allowed_ips','preshared_key','privkey'].forEach(k => body[k] = fd.get(k));
   try { const j = await api('PUT','/clients/'+editingId, body); toast('Клиент обновлён: '+j.client.name); closeModal('editClientModal'); await loadAll(); }
   catch(err){ toast('Не обновил клиента: '+err.message+'\n'+JSON.stringify(err.data||{},null,2), true); }
 });

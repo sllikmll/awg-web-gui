@@ -147,6 +147,32 @@ awg-web-gui/
 MIT
 
 
+
+### SSH key или пароль
+
+В поле `Путь к SSH ключу` указывается путь внутри контейнера. При стандартном volume `./ssh:/ssh:ro` это обычно:
+
+```text
+/ssh/id_ed25519
+```
+
+Для удобства dev/test, если в UI ввести привычный host path:
+
+```text
+/root/.ssh/id_ed25519
+```
+
+а внутри контейнера есть `/ssh/id_ed25519`, приложение автоматически использует `/ssh/id_ed25519`.
+
+Можно не указывать ключ и использовать поле `SSH пароль вместо ключа`. Для этого в Docker image установлен `sshpass`; пароль хранится в SQLite вместе с сервером, так что это удобно для разработки, но для production лучше ключи.
+
+### Private key существующих клиентов
+
+WireGuard/AmneziaWG server config хранит только `PublicKey`, `PresharedKey` и `AllowedIPs` peer'а. Client `PrivateKey` криптографически не восстанавливается из `PublicKey`.
+
+При `Sync` GUI пытается импортировать private keys из Amnezia `clientsTable`, если они там есть. Если `clientsTable` пустой или не содержит private key, у существующего клиента останется `нет private key`; его можно вручную вставить в форме редактирования клиента. После этого станут доступны экспорт config и QR.
+
+
 ## SQLite, мониторинг и traffic accounting
 
 Начиная с Docker/MVP-версии приложение хранит рабочие данные в SQLite:

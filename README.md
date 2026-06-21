@@ -314,15 +314,15 @@ curl -I http://127.0.0.1:8095/
 ![AWG Web GUI Clients View](https://raw.githubusercontent.com/sllikmll/awg-web-gui/main/docs/ui-clients.png)
 
 
-## Features
+## Возможности
 
-- **Auto-detect server settings** - No need to manually enter version, port, subnet, or DNS
-- **SSH key or password auth** - Flexible authentication options
-- **Auto-sync existing peers** - Import existing clients and private keys automatically
-- **Client management** - Add, edit, delete clients with QR code/config export
-- **Monitoring & traffic accounting** - Real-time status, handshake, RX/TX stats
-- **SQLite backend** - Persistent storage for servers, clients, and stats
-- **Docker deployment** - Ready-to-use Docker image with compose example
-- **Periodic metadata refresh** - Auto-update server settings from remote config
-- **Health diagnostics** - Check SSH, NAT, IP forwarding status
-- **Web UI** - Clean, responsive interface for all operations
+- **Автоопределение настроек сервера** - Не нужно вручную вводить версию, порт, подсеть или DNS
+- **Аутентификация по SSH-ключу или паролю** - Гибкие варианты входа
+- **Автосинхронизация существующих клиентов** - Импорт уже созданных клиентов и приватных ключей
+- **Управление клиентами** - Добавление, редактирование, удаление с экспортом QR-кода/конфига
+- **Мониторинг и учёт трафика** - Статус в реальном времени, handshake, RX/TX
+- **База данных SQLite** - Хранение серверов, клиентов и статистики
+- **Запуск через Docker** - Готовый образ и пример docker-compose
+- **Фоновое обновление метаданных** - Актуальные настройки сервера без перезагрузки
+- **Диагностика работоспособности** - Проверка SSH, NAT и IP forwarding
+- **Веб-интерфейс** - Удобный и адаптивный UI для всех операций

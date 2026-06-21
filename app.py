@@ -21,6 +21,7 @@ from typing import Any
 
 import qrcode
 from flask import Flask, jsonify, render_template, request, session
+from werkzeug.security import check_password_hash, generate_password_hash
 from nacl.public import PrivateKey
 from nacl.bindings import crypto_scalarmult_base
 
@@ -35,9 +36,98 @@ USERS_FILE = DATA_DIR / "users.json"
 DB_FILE = DATA_DIR / "awg-web-gui.db"
 POLL_INTERVAL = int(os.environ.get("AWG_POLL_INTERVAL", "30"))
 ONLINE_THRESHOLD = int(os.environ.get("AWG_ONLINE_THRESHOLD", "180"))
+METADATA_REFRESH_INTERVAL = int(os.environ.get("AWG_METADATA_REFRESH_INTERVAL", "300"))
 ENABLE_POLLER = os.environ.get("AWG_ENABLE_POLLER", "1") == "1"
 
 DEFAULT_ADMIN = {"username": "admin", "password_hash": hashlib.sha256(b"admin").hexdigest()}
+
+
+def make_password_hash(password: str) -> str:
+    return generate_password_hash(str(password))
+
+
+def verify_password_hash(stored_hash: str, password: str) -> bool:
+    stored_hash = str(stored_hash or "")
+    password = str(password or "")
+    # Backward compatibility with the original SHA256-only admin/admin records.
+    if re.fullmatch(r"[0-9a-f]{64}", stored_hash):
+        return hashlib.sha256(password.encode()).hexdigest() == stored_hash
+    try:
+        return check_password_hash(stored_hash, password)
+    except Exception:
+        return False
+
+
+def public_server(server: dict[str, Any]) -> dict[str, Any]:
+    item = dict(server)
+    item["has_ssh_password"] = bool(item.get("ssh_password"))
+    item.pop("ssh_password", None)
+    return item
+
+
+def public_client(client: dict[str, Any]) -> dict[str, Any]:
+    item = dict(client)
+    item["has_privkey"] = bool(item.get("privkey"))
+    item.pop("privkey", None)
+    return item
+
+
+def parse_client_conf(conf: str) -> dict[str, str]:
+    section = None
+    interface: dict[str, str] = {}
+    peer: dict[str, str] = {}
+    for raw in str(conf or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+            continue
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        target = interface if section == "interface" else peer if section == "peer" else None
+        if target is not None:
+            target[k.strip().lower()] = v.strip()
+    priv = interface.get("privatekey", "")
+    pub = ""
+    if priv:
+        try:
+            pub = public_from_private(priv)
+        except Exception:
+            pub = ""
+    return {
+        "privkey": priv,
+        "pubkey": pub,
+        "address": interface.get("address", ""),
+        "dns": interface.get("dns", ""),
+        "server_pubkey": peer.get("publickey", ""),
+        "preshared_key": peer.get("presharedkey", ""),
+        "allowed_ips": peer.get("allowedips", ""),
+        "endpoint": peer.get("endpoint", ""),
+    }
+
+
+def metadata_refresh_due(server: dict[str, Any], now_ts: float | None = None) -> bool:
+    last = str(server.get("last_metadata_refresh_at") or "")
+    if not last:
+        return True
+    try:
+        dt = datetime.fromisoformat(last)
+    except Exception:
+        return True
+    now_value = datetime.fromtimestamp(now_ts) if now_ts is not None else datetime.now()
+    return (now_value - dt).total_seconds() >= METADATA_REFRESH_INTERVAL
+
+
+def parse_client_tunnel_ip(address: str) -> str:
+    first = str(address or "").split(",", 1)[0].strip()
+    if not first:
+        return ""
+    try:
+        return str(ipaddress.ip_interface(first).ip)
+    except Exception:
+        return ""
 
 VERSION_DEFAULTS = {
     "1.5": {
@@ -454,6 +544,7 @@ def refresh_server_metadata_from_remote(server: dict[str, Any]) -> dict[str, Any
     # Preserve stable identity and friendly name.
     refreshed["id"] = server["id"]
     refreshed["name"] = server.get("name") or refreshed["name"]
+    refreshed["last_metadata_refresh_at"] = now()
     server.update(refreshed)
     return server
 
@@ -697,13 +788,6 @@ def build_client_conf(server: dict[str, Any], client: dict[str, Any], sp: dict[s
         f"PrivateKey = {client['privkey']}",
         f"Address = {client['address']}",
     ]
-def build_client_conf(server: dict[str, Any], client: dict[str, Any], sp: dict[str, Any]) -> str:
-    params = sp.get("params", {}) or {}
-    lines = [
-        "[Interface]",
-        f"PrivateKey = {client['privkey']}",
-        f"Address = {client['address']}",
-    ]
     if server.get("dns"):
         lines.append(f"DNS = {server['dns']}")
     for key in AWG_PARAM_KEYS:
@@ -864,10 +948,11 @@ def update_client_stat(server: dict[str, Any], client: dict[str, Any], peer: dic
 
 
 def poll_server_stats(server: dict[str, Any]) -> dict[str, Any]:
-    # Periodically refresh server metadata from remote config
-    if random.random() < 0.1:  # 10% chance per poll cycle
+    # Periodically refresh server metadata from remote config without mutating remote VPN config.
+    if metadata_refresh_due(server):
         refresh_server_metadata_from_remote(server)
-        
+        persist()
+
     tools = version_defaults(server["version"])["show_tools"]
     result = {"ok": False, "server_id": server["id"], "updated": 0, "error": "not tried"}
     dump = None
@@ -943,8 +1028,8 @@ def me():
 @app.route("/api/login", methods=["POST"])
 def login():
     data = request.json or {}
-    h = hashlib.sha256(str(data.get("password", "")).encode()).hexdigest()
-    u = next((x for x in USERS if x["username"] == data.get("username") and x["password_hash"] == h), None)
+    password = str(data.get("password", ""))
+    u = next((x for x in USERS if x["username"] == data.get("username") and verify_password_hash(x.get("password_hash", ""), password)), None)
     if not u:
         return jsonify({"ok": False, "error": "bad credentials"}), 401
     session["logged_in"] = True
@@ -961,7 +1046,7 @@ def logout():
 @app.route("/api/servers", methods=["GET"])
 @login_required
 def list_servers():
-    return jsonify(SERVERS)
+    return jsonify({sid: public_server(srv) for sid, srv in SERVERS.items()})
 
 
 @app.route("/api/servers", methods=["POST"])
@@ -972,13 +1057,26 @@ def add_server():
         if not data.get("version"):
             servers = detect_awg_servers(data)
             created = []
+            sync_results = {}
             for s in servers:
                 if s["id"] in SERVERS:
                     continue
                 SERVERS[s["id"]] = s
                 created.append(s)
             persist()
-            return jsonify({"ok": True, "server": created[0] if created else servers[0], "servers": created, "detected": servers})
+            if data.get("auto_sync", True):
+                for s in created:
+                    try:
+                        sync_results[s["id"]] = sync_server_peers(s["id"])
+                    except Exception as exc:
+                        sync_results[s["id"]] = {"ok": False, "error": str(exc)}
+            return jsonify({
+                "ok": True,
+                "server": public_server(created[0] if created else servers[0]),
+                "servers": [public_server(x) for x in created],
+                "detected": [public_server(x) for x in servers],
+                "sync": sync_results,
+            })
 
         s = normalize_server(data)
         if not s["name"] or not s["host"]:
@@ -1003,7 +1101,7 @@ def add_server():
                 sync_result = {"ok": False, "error": "auto-sync failed"}
         else:
             sync_result = {"ok": True, "skipped": True}
-        return jsonify({"ok": True, "server": s, "servers": [s], "sync": sync_result})
+        return jsonify({"ok": True, "server": public_server(s), "servers": [public_server(s)], "sync": sync_result})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
@@ -1018,7 +1116,7 @@ def update_server(sid):
         s["id"] = sid
         SERVERS[sid] = s
         persist()
-        return jsonify({"ok": True, "server": s})
+        return jsonify({"ok": True, "server": public_server(s)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
@@ -1051,26 +1149,55 @@ def server_diagnose(sid):
     s = SERVERS.get(sid)
     if not s:
         return jsonify({"ok": False, "error": "not found"}), 404
-    
-    # Check SSH connectivity
-    ssh_check = validate_server(s)
-    
-    # Check IP forwarding
-    ip_forward = cexec(s, "sysctl net.ipv4.ip_forward", timeout=10)
-    
-    # Check NAT rules
-    nat_check = cexec(s, "iptables -t nat -L POSTROUTING -n", timeout=10)
-    
-    # Check container interface
-    iface_check = cexec(s, f"ip addr show {q(s['interface'])}", timeout=10)
-    
-    return jsonify({
-        "ok": True,
-        "ssh": ssh_check,
-        "ip_forward": ip_forward,
-        "nat": nat_check,
-        "interface": iface_check
-    })
+
+    validation = validate_server(s)
+    host_ip_forward = ssh_run(s, "sysctl -n net.ipv4.ip_forward", timeout=10)
+    host_nat = ssh_run(s, "iptables -t nat -S POSTROUTING 2>/dev/null || nft list ruleset 2>/dev/null || true", timeout=15)
+    container_iface = cexec(s, f"ip addr show {q(s['interface'])}", timeout=10)
+    dump_result = cexec(s, f"{('awg' if s['version'] == '2.0' else 'wg')} show {q(s['interface'])} dump", timeout=15)
+    peers = parse_wg_dump(dump_result.get("out", "")) if dump_result.get("ok") else []
+
+    subnet = str(s.get("subnet") or "")
+    nat_text = (host_nat.get("out") or "") + "\n" + (host_nat.get("err") or "")
+    nat_mentions_subnet = bool(subnet and subnet in nat_text)
+    nat_has_masquerade = "MASQUERADE" in nat_text.upper() or "SNAT" in nat_text.upper()
+    ip_forward_enabled = (host_ip_forward.get("out") or "").strip() == "1"
+    subnet_mismatches = []
+    try:
+        net = ipaddress.ip_network(subnet, strict=False)
+        for peer in peers:
+            for part in str(peer.get("allowed_ips") or "").split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    ip = ipaddress.ip_interface(part).ip
+                    if ip.version == net.version and ip not in net:
+                        subnet_mismatches.append({"public_key": peer.get("public_key"), "allowed_ip": part, "subnet": subnet})
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    issues = []
+    if not validation.get("ok"):
+        issues.append(f"health failed at {validation.get('stage')}")
+    if not ip_forward_enabled:
+        issues.append("ip_forward is disabled")
+    if peers and nat_has_masquerade and not nat_mentions_subnet:
+        issues.append("handshake/runtime peers exist, but NAT rules do not mention server subnet")
+    if subnet_mismatches:
+        issues.append("peer allowed IPs do not match server subnet")
+
+    checks = {
+        "ssh_container_config_runtime": validation,
+        "host_ip_forward": {"ok": ip_forward_enabled, "raw": host_ip_forward},
+        "host_nat": {"ok": bool(nat_has_masquerade), "mentions_subnet": nat_mentions_subnet, "raw": host_nat},
+        "container_interface": {"ok": container_iface.get("ok"), "raw": container_iface},
+        "runtime_dump": {"ok": dump_result.get("ok"), "peers": len(peers)},
+        "subnet_mismatches": subnet_mismatches,
+    }
+    return jsonify({"ok": not issues, "issues": issues, "checks": checks, "summary": {"peers": len(peers), "online": sum(1 for p in peers if p.get("online")), "subnet": subnet}})
 
 
 @app.route("/api/servers/<sid>/sync", methods=["POST"])
@@ -1119,13 +1246,193 @@ def sync_server(sid):
     return jsonify({"ok": True, "peers": len(peers), "added": added, "enriched_private_keys": enriched, "private_key_source": "clientsTable", "runtime_ok": runtime["ok"]})
 
 
+@app.route("/api/servers/<sid>/enrich-keys", methods=["POST"])
+@login_required
+def enrich_server_keys(sid):
+    s = SERVERS.get(sid)
+    if not s:
+        return jsonify({"ok": False, "error": "not found"}), 404
+    known_private = private_keys_from_clients_table(s)
+    enriched = 0
+    for client in CLIENTS:
+        if client.get("server_id") != sid or not client.get("pubkey"):
+            continue
+        meta = known_private.get(client.get("pubkey"), {})
+        if meta.get("privkey") and not client.get("privkey"):
+            client["privkey"] = meta["privkey"]
+            enriched += 1
+        if meta.get("preshared_key") and not client.get("preshared_key"):
+            client["preshared_key"] = meta["preshared_key"]
+    persist()
+    write_event("enrich_keys", server_id=sid, message=f"Enriched {enriched} private keys")
+    return jsonify({"ok": True, "enriched": enriched, "known_private_keys": len(known_private)})
+
+
+@app.route("/api/clients/import-config", methods=["POST"])
+@login_required
+def import_client_config():
+    data = request.json or {}
+    sid = data.get("server_id")
+    s = SERVERS.get(sid)
+    if not s:
+        return jsonify({"ok": False, "error": "server not found"}), 404
+    parsed = parse_client_conf(str(data.get("config") or ""))
+    if not parsed.get("privkey") or not parsed.get("pubkey"):
+        return jsonify({"ok": False, "error": "config must contain a valid Interface PrivateKey"}), 400
+    existing = next((c for c in CLIENTS if c.get("server_id") == sid and c.get("pubkey") == parsed["pubkey"]), None)
+    if existing:
+        if parsed.get("privkey"):
+            existing["privkey"] = parsed["privkey"]
+        for src, dst in [("address", "address"), ("preshared_key", "preshared_key"), ("allowed_ips", "allowed_ips")]:
+            if parsed.get(src):
+                existing[dst] = parsed[src]
+        existing["updated_at"] = now()
+        client = existing
+        action = "updated"
+    else:
+        client = {
+            "id": str(uuid.uuid4())[:8],
+            "server_id": sid,
+            "name": str(data.get("name") or f"imported_{parsed['pubkey'][:8]}"),
+            "privkey": parsed["privkey"],
+            "pubkey": parsed["pubkey"],
+            "preshared_key": parsed.get("preshared_key", ""),
+            "address": parsed.get("address", ""),
+            "allowed_ips": parsed.get("allowed_ips", "0.0.0.0/0, ::/0"),
+            "created_at": now(),
+            "_from_import": True,
+        }
+        CLIENTS.append(client)
+        action = "created"
+    persist()
+    write_event("import_config", server_id=sid, client_id=client["id"], message=f"Client config {action}")
+    return jsonify({"ok": True, "action": action, "client": public_client(client)})
+
+
+@app.route("/api/clients/<cid>/disable", methods=["POST"])
+@login_required
+def disable_client(cid):
+    client = next((c for c in CLIENTS if c.get("id") == cid), None)
+    if not client:
+        return jsonify({"ok": False, "error": "not found"}), 404
+    s = SERVERS.get(client.get("server_id"))
+    if s and client.get("pubkey") and not client.get("disabled"):
+        apply = apply_client_to_server(s, client, remove=True)
+        if not apply["ok"]:
+            return jsonify({"ok": False, "error": "failed to disable peer on server", "apply": apply}), 502
+    client["disabled"] = True
+    client["updated_at"] = now()
+    persist()
+    write_event("client_disabled", server_id=client.get("server_id"), client_id=cid, message=client.get("name", ""))
+    return jsonify({"ok": True, "client": public_client(client)})
+
+
+@app.route("/api/clients/<cid>/enable", methods=["POST"])
+@login_required
+def enable_client(cid):
+    client = next((c for c in CLIENTS if c.get("id") == cid), None)
+    if not client:
+        return jsonify({"ok": False, "error": "not found"}), 404
+    s = SERVERS.get(client.get("server_id"))
+    if s and client.get("pubkey"):
+        apply = apply_client_to_server(s, client, remove=False)
+        if not apply["ok"]:
+            return jsonify({"ok": False, "error": "failed to enable peer on server", "apply": apply}), 502
+    client["disabled"] = False
+    client["updated_at"] = now()
+    persist()
+    write_event("client_enabled", server_id=client.get("server_id"), client_id=cid, message=client.get("name", ""))
+    return jsonify({"ok": True, "client": public_client(client)})
+
+
+@app.route("/api/servers/<sid>/backups")
+@login_required
+def list_server_backups(sid):
+    s = SERVERS.get(sid)
+    if not s:
+        return jsonify({"ok": False, "error": "not found"}), 404
+    r = cexec(s, f"ls -1t {q(s['config_path'])}.bak-* 2>/dev/null | head -50 || true", timeout=15)
+    backups = [line.strip() for line in (r.get("out") or "").splitlines() if line.strip()]
+    return jsonify({"ok": True, "backups": backups})
+
+
+@app.route("/api/servers/<sid>/backups/restore", methods=["POST"])
+@login_required
+def restore_server_backup(sid):
+    s = SERVERS.get(sid)
+    if not s:
+        return jsonify({"ok": False, "error": "not found"}), 404
+    backup = str((request.json or {}).get("backup") or "")
+    expected_prefix = s["config_path"] + ".bak-"
+    if not backup.startswith(expected_prefix):
+        return jsonify({"ok": False, "error": "backup path is not allowed"}), 400
+    pre = backup_server_conf(s)
+    if not pre.get("ok"):
+        return jsonify({"ok": False, "error": "failed to backup current config before restore", "backup": pre}), 502
+    r = cexec(s, f"cp {q(backup)} {q(s['config_path'])} && true", timeout=20)
+    if not r.get("ok"):
+        return jsonify({"ok": False, "error": "restore copy failed", "detail": r}), 502
+    restart = ssh_run(s, f"docker restart {q(s['container'])} >/dev/null", timeout=90)
+    write_event("backup_restore", server_id=sid, message=backup, data={"restart": restart})
+    return jsonify({"ok": restart.get("ok"), "restore": r, "restart": restart})
+
+
+@app.route("/api/fleet/import", methods=["POST"])
+@login_required
+def import_fleet():
+    data = request.json or {}
+    items = data.get("servers") or []
+    if isinstance(items, str):
+        try:
+            items = json.loads(items)
+        except Exception:
+            return jsonify({"ok": False, "error": "servers must be a JSON array"}), 400
+    if not isinstance(items, list):
+        return jsonify({"ok": False, "error": "servers must be a list"}), 400
+    results = []
+    for item in items:
+        try:
+            detected = detect_awg_servers(item)
+            created = []
+            sync_results = {}
+            for srv in detected:
+                if any(existing.get("name") == srv.get("name") and existing.get("host") == srv.get("host") and existing.get("version") == srv.get("version") for existing in SERVERS.values()):
+                    continue
+                SERVERS[srv["id"]] = srv
+                created.append(srv)
+            persist()
+            for srv in created:
+                sync_results[srv["id"]] = sync_server_peers(srv["id"])
+            results.append({"ok": True, "input": item, "created": [public_server(x) for x in created], "sync": sync_results})
+        except Exception as exc:
+            results.append({"ok": False, "input": item, "error": str(exc)})
+    return jsonify({"ok": all(r.get("ok") for r in results), "results": results})
+
+
+@app.route("/api/password", methods=["PUT"])
+@login_required
+def change_password():
+    data = request.json or {}
+    current = str(data.get("current_password") or "")
+    new_password = str(data.get("new_password") or "")
+    if len(new_password) < 8:
+        return jsonify({"ok": False, "error": "new password must be at least 8 characters"}), 400
+    user = next((x for x in USERS if x["username"] == session.get("username")), None)
+    if not user or not verify_password_hash(user.get("password_hash", ""), current):
+        return jsonify({"ok": False, "error": "current password is invalid"}), 400
+    user["password_hash"] = make_password_hash(new_password)
+    persist()
+    write_event("password_changed", message=user["username"])
+    return jsonify({"ok": True})
+
+
 @app.route("/api/clients")
 @login_required
 def list_clients():
     result = []
     stats = stats_by_client_id()
     for c in CLIENTS:
-        item = dict(c)
+        item = public_client(c)
         item["server_name"] = SERVERS.get(c.get("server_id"), {}).get("name", "?")
         item["stats"] = stats.get(c.get("id"), {})
         result.append(item)
@@ -1164,7 +1471,7 @@ def add_client():
             return jsonify({"ok": False, "error": "failed to apply peer to server", "apply": apply}), 502
         CLIENTS.append(client)
         persist()
-        return jsonify({"ok": True, "client": client, "apply": apply})
+        return jsonify({"ok": True, "client": public_client(client), "apply": apply})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
@@ -1177,10 +1484,11 @@ def update_client(cid):
         return jsonify({"ok": False, "error": "not found"}), 404
     data = request.json or {}
     updated = dict(client)
-    for k in ["name", "allowed_ips", "address", "preshared_key", "privkey"]:
+    for k in ["name", "allowed_ips", "address", "preshared_key"]:
         if k in data:
             updated[k] = data[k]
-    if data.get("privkey") and not updated.get("pubkey"):
+    if data.get("privkey"):
+        updated["privkey"] = data["privkey"]
         updated["pubkey"] = public_from_private(data["privkey"])
     s = SERVERS.get(updated.get("server_id"))
     if s and updated.get("pubkey"):
@@ -1189,7 +1497,7 @@ def update_client(cid):
             return jsonify({"ok": False, "error": "failed to update server peer", "apply": apply}), 502
     client.update(updated)
     persist()
-    return jsonify({"ok": True, "client": client})
+    return jsonify({"ok": True, "client": public_client(client)})
 
 
 @app.route("/api/clients/<cid>", methods=["DELETE"])
@@ -1285,4 +1593,3 @@ start_poller_once()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5173")), debug=os.environ.get("FLASK_DEBUG", "0") == "1")
-import random

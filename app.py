@@ -1045,6 +1045,34 @@ def server_health(sid):
     return jsonify(validate_server(s))
 
 
+@app.route("/api/servers/<sid>/diagnose")
+@login_required
+def server_diagnose(sid):
+    s = SERVERS.get(sid)
+    if not s:
+        return jsonify({"ok": False, "error": "not found"}), 404
+    
+    # Check SSH connectivity
+    ssh_check = validate_server(s)
+    
+    # Check IP forwarding
+    ip_forward = cexec(s, "sysctl net.ipv4.ip_forward", timeout=10)
+    
+    # Check NAT rules
+    nat_check = cexec(s, "iptables -t nat -L POSTROUTING -n", timeout=10)
+    
+    # Check container interface
+    iface_check = cexec(s, f"ip addr show {q(s['interface'])}", timeout=10)
+    
+    return jsonify({
+        "ok": True,
+        "ssh": ssh_check,
+        "ip_forward": ip_forward,
+        "nat": nat_check,
+        "interface": iface_check
+    })
+
+
 @app.route("/api/servers/<sid>/sync", methods=["POST"])
 @login_required
 def sync_server(sid):

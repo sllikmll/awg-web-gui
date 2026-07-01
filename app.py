@@ -383,6 +383,7 @@ def ssh_base_cmd(server: dict[str, Any]) -> tuple[list[str], dict[str, str] | No
         "ssh",
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "LogLevel=ERROR",
         "-o", "ConnectTimeout=7",
         "-p", str(server.get("ssh_port", 22)),
     ]
@@ -486,6 +487,41 @@ def parse_interface_params(conf: str) -> dict[str, str]:
     return params
 
 
+def infer_subnet_from_conf(conf: str, address: str) -> str:
+    address = (address or "").strip()
+    if not address:
+        return ""
+    first = address.split(",", 1)[0].strip()
+    try:
+        iface_net = ipaddress.ip_network(first, strict=False)
+    except Exception:
+        return ""
+    if getattr(iface_net, "prefixlen", None) != 32:
+        return str(iface_net)
+    peer_ips = []
+    for raw in conf.splitlines():
+        line = raw.strip()
+        if not line.lower().startswith("allowedips"):
+            continue
+        _, _, rhs = line.partition("=")
+        for item in rhs.split(","):
+            item = item.strip()
+            if not item or ":" in item:
+                continue
+            try:
+                net = ipaddress.ip_network(item, strict=False)
+            except Exception:
+                continue
+            if getattr(net, "version", None) != 4:
+                continue
+            peer_ips.append(net.network_address)
+    iface_ip = iface_net.network_address
+    iface_octets = str(iface_ip).split(".")[:3]
+    if peer_ips and all(str(ip).split(".")[:3] == iface_octets for ip in peer_ips):
+        return str(ipaddress.ip_network(f"{iface_ip}/24", strict=False))
+    return str(iface_net)
+
+
 def parse_interface_value(conf: str, key: str) -> str:
     section = None
     for raw in conf.splitlines():
@@ -518,9 +554,9 @@ def build_detected_server(base: dict[str, Any], version: str, conf: str) -> dict
     d = version_defaults(version)
     data = dict(base)
     data["version"] = version
-    data["container"] = d["container"]
-    data["interface"] = d["interface"]
-    data["config_path"] = d["config_path"]
+    data["container"] = str(base.get("container") or d["container"]).strip() or d["container"]
+    data["interface"] = str(base.get("interface") or d["interface"]).strip() or d["interface"]
+    data["config_path"] = str(base.get("config_path") or d["config_path"]).strip() or d["config_path"]
 
     listen_port = parse_interface_value(conf, "ListenPort")
     if listen_port:
@@ -528,7 +564,7 @@ def build_detected_server(base: dict[str, Any], version: str, conf: str) -> dict
 
     address = parse_interface_value(conf, "Address")
     if address:
-        data["subnet"] = str(ipaddress.ip_network(address.split(",", 1)[0].strip(), strict=False))
+        data["subnet"] = infer_subnet_from_conf(conf, address)
 
     dns = parse_interface_value(conf, "DNS") or data.get("dns") or "1.1.1.1,8.8.8.8"
     data["dns"] = dns
@@ -1186,7 +1222,8 @@ def server_diagnose(sid):
         issues.append(f"health failed at {validation.get('stage')}")
     if not ip_forward_enabled:
         issues.append("ip_forward is disabled")
-    if peers and nat_has_masquerade and not nat_mentions_subnet:
+    generic_masq = bool(re.search(r"^-A POSTROUTING -o \S+ -j MASQUERADE$", nat_text, re.M))
+    if peers and nat_has_masquerade and not nat_mentions_subnet and not generic_masq:
         issues.append("handshake/runtime peers exist, but NAT rules do not mention server subnet")
     if subnet_mismatches:
         issues.append("peer allowed IPs do not match server subnet")
